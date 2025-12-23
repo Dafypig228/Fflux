@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CognitiveServices.Speech" Version="1.47.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Speech">
+      <HintPath>bin\x64\Debug\net10.0-windows\runtimes\win\lib\net10.0\System.Speech.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
