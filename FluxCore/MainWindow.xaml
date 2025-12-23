@@ -38,7 +38,7 @@
         </Style>
 
         <Style TargetType="ScrollBar">
-            <Setter Property="Width" Value="4"/>
+            <Setter Property="Width" Value="6"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ScrollBar">
@@ -78,37 +78,95 @@
 
             <StackPanel Name="ButtonContainer" Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Center" MouseLeftButtonDown="Window_MouseLeftButtonDown"/>
 
-            <ScrollViewer Name="ChatScroller" Grid.Row="2" MaxHeight="400" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                <ItemsControl Name="ChatList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,8,0,8">
-                                <Border Name="Bubble" Padding="16,12" MaxWidth="320">
-                                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap" Foreground="White" FontSize="15" LineHeight="22">
-                                        <TextBlock.Effect>
-                                            <DropShadowEffect BlurRadius="2" ShadowDepth="1" Opacity="0.4"/>
-                                        </TextBlock.Effect>
-                                    </TextBlock>
-                                </Border>
-                            </Grid>
-                            <DataTemplate.Triggers>
-                                <DataTrigger Binding="{Binding IsUser}" Value="True">
-                                    <Setter TargetName="Bubble" Property="HorizontalAlignment" Value="Right"/>
-                                    <Setter TargetName="Bubble" Property="Background" Value="#0078D4"/>
-                                    <Setter TargetName="Bubble" Property="CornerRadius" Value="18,18,4,18"/>
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding IsUser}" Value="False">
-                                    <Setter TargetName="Bubble" Property="HorizontalAlignment" Value="Left"/>
-                                    <Setter TargetName="Bubble" Property="Background" Value="#2D2D2D"/>
-                                    <Setter TargetName="Bubble" Property="CornerRadius" Value="18,18,18,4"/>
-                                    <Setter TargetName="Bubble" Property="BorderBrush" Value="#20FFFFFF"/>
-                                    <Setter TargetName="Bubble" Property="BorderThickness" Value="1"/>
-                                </DataTrigger>
-                            </DataTemplate.Triggers>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </ScrollViewer>
+            <ListBox x:Name="ChatList" 
+                     Grid.Row="2" 
+                     MaxHeight="400"
+                     Background="Transparent" 
+                     BorderThickness="0"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     Margin="0">
+
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Setter Property="Margin" Value="0,4,0,4"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <ContentPresenter />
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsUser}" Value="True">
+                                            <Setter Property="HorizontalAlignment" Value="Right"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsUser}" Value="False">
+                                            <Setter Property="HorizontalAlignment" Value="Left"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Border Name="Bubble" MaxWidth="350" Padding="12" CornerRadius="12">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsUser}" Value="True">
+                                                <Setter Property="Background" Value="#0078D7"/>
+                                                <Setter Property="CornerRadius" Value="18,18,4,18"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsUser}" Value="False">
+                                                <Setter Property="Background" Value="#2D2D30"/>
+                                                <Setter Property="CornerRadius" Value="18,18,18,4"/>
+                                                <Setter Property="BorderBrush" Value="#20FFFFFF"/>
+                                                <Setter Property="BorderThickness" Value="1"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+
+                                <TextBox Text="{Binding Text}" 
+                                         IsReadOnly="True" 
+                                         TextWrapping="Wrap"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         Foreground="White"
+                                         FontSize="15"
+                                         FontFamily="Segoe UI"
+                                         IsInactiveSelectionHighlightEnabled="True"
+                                         ContextMenu="{x:Null}">
+                                    <TextBox.Style>
+                                        <Style TargetType="TextBox">
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="TextBox">
+                                                        <Grid>
+                                                            <ScrollViewer x:Name="PART_ContentHost"/>
+                                                        </Grid>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Style>
+                                    </TextBox.Style>
+                                </TextBox>
+                            </Border>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+
         </Grid>
     </Border>
 </Window>
