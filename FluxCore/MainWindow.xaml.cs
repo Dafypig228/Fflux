@@ -3,107 +3,171 @@ using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
-using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace FluxCore
 {
-    public class ChatMessage { public string Text { get; set; } = ""; public bool IsUser { get; set; } }
+    // --- МОДЕЛЬ СООБЩЕНИЯ ---
+    public class ChatMessage
+    {
+        public string Text { get; set; } = string.Empty;
+        public bool IsUser { get; set; }
+    }
 
+    // --- ГЛАВНОЕ ОКНО ---
     public partial class MainWindow : Window
     {
-        // СЕРВИСЫ
-        private AudioService? _audioService;
-        private ScreenService? _screenService;
-        private ContextService? _contextService; // <--- НОВЫЙ СЕРВИС
-        private GeminiService? _geminiService;
+        // СЕРВИСЫ (Если каких-то файлов нет, просто закомментируй строки с ошибками)
+        private SensoryCortex? _cortex;
+        private NeuralLink? _neuralLink;
+        private OmniLoop? _omniLoop;
+        private AudioService? _audio;
 
+        private DispatcherTimer? _heartbeat;
         private bool _isProcessing = false;
+
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
 
         public MainWindow()
         {
             InitializeComponent();
-            ChatList.ItemsSource = Messages;
-            AddButton("🎤 Test", () => ProcessRequest("Что это за кнопка?")); // Кнопка для теста без микрофона
-            AddButton("❌ Exit", () => Application.Current.Shutdown());
-            InitializeServices();
+
+            // 1. Привязываем чат
+            if (ChatList != null) ChatList.ItemsSource = Messages;
+
+            // 2. Включаем неоновый блюр при загрузке
+            this.Loaded += (s, e) =>
+            {
+                NeonBlur.Enable(this); // Включаем размытие фона
+                InitializeSystem();    // Запускаем ИИ
+            };
         }
 
-        private void InitializeServices()
+        private void InitializeSystem()
         {
             try
             {
-                _geminiService = new GeminiService("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs"); // Твой ключ
-                _screenService = new ScreenService();
-                _contextService = new ContextService(); // Инициализация контекста
+                AddMessage("FluxCore Systems: ONLINE", false);
 
-                _audioService = new AudioService();
-                _audioService.OnFinalText += async (text) => await ProcessRequest(text);
-                _audioService.StartContinuousRecording();
+                string key = "ТВОЙ_КЛЮЧ_API";
 
-                AddMessage("👁️ FluxCore Context-Aware: ONLINE", false);
-            }
-            catch (Exception ex) { AddMessage($"Ошибка старта: {ex.Message}", false); }
-        }
+                // Инициализация мозгов
+                // Если нет этих файлов, закомментируй этот блок
+                _cortex = new SensoryCortex();
+                _neuralLink = new NeuralLink(key);
+                _omniLoop = new OmniLoop(_cortex, _neuralLink);
 
-        // --- ГЛАВНАЯ ЛОГИКА (PIPELINE) ---
-        // Вставь это в метод ProcessRequest
-        private async Task ProcessRequest(string userVoice)
-        {
-            if (_isProcessing || string.IsNullOrWhiteSpace(userVoice) || userVoice.Length < 2) return;
-            _isProcessing = true;
+                _audio = new AudioService();
+                _audio.OnFinalText += async (txt) => await ProcessRequest(txt);
+                _audio.StartContinuousRecording();
 
-            Dispatcher.Invoke(() => AddMessage(userVoice, true));
-
-            // Индикатор работы (чтобы ты видел, что процесс идет)
-            Dispatcher.Invoke(() => AddMessage("⚡ Анализ Tier 1...", false));
-
-            try
-            {
-                // 1. Метаданные (Мгновенно)
-                string appMeta = _contextService!.GetAppMetadata();
-
-                // 2. Что под мышкой (Мгновенно)
-                string mouseData = _contextService.GetElementUnderMouse();
-
-                // 3. Текст экрана (OCR)
-                // Если экран не менялся - можно было бы кэшировать, но пока берем свежий
-                string screenText = await _screenService!.AnalyzeScreenAsync();
-
-                // 4. Отправка в Gemini
-                string answer = await _geminiService!.AskContextAware(userVoice, appMeta, mouseData, screenText);
-
-                Dispatcher.Invoke(() => {
-                    // Удаляем "Анализ..."
-                    if (Messages.Count > 0 && Messages[Messages.Count - 1].Text.StartsWith("⚡"))
-                        Messages.RemoveAt(Messages.Count - 1);
-
-                    AddMessage(answer, false);
-                });
+                // Таймер "сердцебиения"
+                _heartbeat = new DispatcherTimer();
+                _heartbeat.Interval = TimeSpan.FromSeconds(2);
+                _heartbeat.Tick += (s, e) => { if (_omniLoop != null) _omniLoop.Pulse(); };
+                _heartbeat.Start();
             }
             catch (Exception ex)
             {
-                Dispatcher.Invoke(() => AddMessage($"Ошибка: {ex.Message}", false));
+                AddMessage($"System Warning: {ex.Message}", false);
+            }
+        }
+
+        private async Task ProcessRequest(string text)
+        {
+            if (_isProcessing || text.Length < 2) return;
+            _isProcessing = true;
+
+            Dispatcher.Invoke(() => AddMessage(text, true));
+            Dispatcher.Invoke(() => AddMessage("Computing...", false));
+
+            try
+            {
+                // Запрос к ИИ
+                string response = await _omniLoop!.UserQuery(text);
+
+                Dispatcher.Invoke(() => {
+                    if (Messages.Count > 0 && Messages[Messages.Count - 1].Text == "Computing...")
+                        Messages.RemoveAt(Messages.Count - 1);
+
+                    AddMessage(response, false);
+                });
+            }
+            catch
+            {
+                // Игнорируем ошибки сети
             }
 
             _isProcessing = false;
         }
 
-        // --- Стандартные методы UI (Кнопки, Скролл, Drag) ---
         private void AddMessage(string text, bool isUser)
         {
             Messages.Add(new ChatMessage { Text = text, IsUser = isUser });
-            if (ChatList.Items.Count > 0) ChatList.ScrollIntoView(ChatList.Items[ChatList.Items.Count - 1]);
+            if (ChatList != null && ChatList.Items.Count > 0)
+                ChatList.ScrollIntoView(ChatList.Items[ChatList.Items.Count - 1]);
         }
-        private void AddButton(string title, Action onClick)
+
+        // ВАЖНО: Метод перетаскивания (упомянут в твоем XAML)
+        private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            var btn = new Button { Content = title, Height = 30, Margin = new Thickness(5), Background = Brushes.Transparent, Foreground = Brushes.White };
-            btn.Click += (s, e) => onClick();
-            ButtonContainer.Children.Add(btn);
+            if (e.ButtonState == MouseButtonState.Pressed) this.DragMove();
         }
-        private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); }
+    }
+
+    // --- УНИКАЛЬНЫЙ КЛАСС БЛЮРА (Я переименовал его, чтобы не было ошибок дубликатов) ---
+    public static class NeonBlur
+    {
+        [DllImport("user32.dll")]
+        internal static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct WindowCompositionAttributeData
+        {
+            public WindowCompositionAttribute Attribute;
+            public IntPtr Data;
+            public int SizeData;
+        }
+
+        internal enum WindowCompositionAttribute { WCA_ACCENT_POLICY = 19 }
+        internal enum AccentState
+        {
+            ACCENT_DISABLED = 0,
+            ACCENT_ENABLE_BLURBEHIND = 3, // Классический блюр
+            ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct AccentPolicy
+        {
+            public AccentState AccentState;
+            public int AccentFlags;
+            public int GradientColor;
+            public int AnimationId;
+        }
+
+        public static void Enable(Window window)
+        {
+            var windowHelper = new WindowInteropHelper(window);
+            var accent = new AccentPolicy();
+
+            // Используем режим 3 (BLURBEHIND), он лучше всего сочетается с твоим цветом #CC101010
+            accent.AccentState = AccentState.ACCENT_ENABLE_BLURBEHIND;
+            accent.GradientColor = 0;
+
+            var accentStructSize = Marshal.SizeOf(accent);
+            var accentPtr = Marshal.AllocHGlobal(accentStructSize);
+            Marshal.StructureToPtr(accent, accentPtr, false);
+
+            var data = new WindowCompositionAttributeData();
+            data.Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY;
+            data.SizeData = accentStructSize;
+            data.Data = accentPtr;
+
+            SetWindowCompositionAttribute(windowHelper.Handle, ref data);
+            Marshal.FreeHGlobal(accentPtr);
+        }
     }
 }

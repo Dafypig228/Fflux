@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using System.Windows;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
-// 🔥 ВАЖНО: Этот using нужен для работы метода AsRandomAccessStream()
 using System.Runtime.InteropServices.WindowsRuntime;
 
 namespace FluxCore
@@ -15,60 +14,65 @@ namespace FluxCore
     public class ScreenService
     {
         private OcrEngine? _ocrEngine;
+        private byte[] _lastScreenHash = Array.Empty<byte>(); // Для Delta-анализа пикселей
 
         public ScreenService()
         {
-            try
-            {
-                _ocrEngine = OcrEngine.TryCreateFromUserProfileLanguages();
-            }
-            catch { _ocrEngine = null; }
+            try { _ocrEngine = OcrEngine.TryCreateFromUserProfileLanguages(); } catch { }
         }
 
-        public async Task<string> AnalyzeScreenAsync()
+        public async Task<(string Text, bool VisualChanged)> GetLayer2_OCR_WithDelta()
         {
-            if (_ocrEngine == null) return "[OCR недоступен в этой Windows]";
+            if (_ocrEngine == null) return ("[OCR Error]", false);
 
-            try
+            int w = (int)SystemParameters.PrimaryScreenWidth;
+            int h = (int)SystemParameters.PrimaryScreenHeight;
+
+            using var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(0, 0, 0, 0, bmp.Size);
+
+            // 1. Delta-анализ (Low-level): Проверяем центр экрана, изменился ли он?
+            // Это очень грубая, но супер-быстрая проверка, чтобы не гонять OCR
+            bool visualChanged = CheckIfScreenChanged(bmp);
+
+            if (!visualChanged) return ("", false); // Экран статичен, OCR не нужен
+
+            // 2. OCR Выполняем
+            using var stream = new MemoryStream();
+            bmp.Save(stream, ImageFormat.Bmp);
+            stream.Position = 0;
+            var decoder = await BitmapDecoder.CreateAsync(stream.AsRandomAccessStream());
+            using var sBmp = await decoder.GetSoftwareBitmapAsync();
+            var res = await _ocrEngine.RecognizeAsync(sBmp);
+
+            // Формируем текст с координатами (простая эмуляция структуры)
+            StringBuilder sb = new StringBuilder();
+            foreach (var line in res.Lines)
             {
-                int width = (int)SystemParameters.PrimaryScreenWidth;
-                int height = (int)SystemParameters.PrimaryScreenHeight;
-
-                using (var bitmap = new Bitmap(width, height))
-                {
-                    using (var g = Graphics.FromImage(bitmap))
-                    {
-                        g.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
-                    }
-
-                    using (var stream = new MemoryStream())
-                    {
-                        bitmap.Save(stream, ImageFormat.Bmp);
-                        stream.Position = 0;
-
-                        // 🔥 ИСПРАВЛЕНИЕ: Явная конвертация потока
-                        // Если AsRandomAccessStream подчеркивает красным, убедись, 
-                        // что в .csproj стоит target netX.X-windows10.0.19041.0
-                        var randomAccessStream = stream.AsRandomAccessStream();
-
-                        var decoder = await BitmapDecoder.CreateAsync(randomAccessStream);
-                        using (var softwareBitmap = await decoder.GetSoftwareBitmapAsync())
-                        {
-                            var ocrResult = await _ocrEngine.RecognizeAsync(softwareBitmap);
-
-                            StringBuilder sb = new StringBuilder();
-                            foreach (var line in ocrResult.Lines) sb.AppendLine(line.Text);
-
-                            var text = sb.ToString().Trim();
-                            return string.IsNullOrEmpty(text) ? "[Пустой экран]" : text;
-                        }
-                    }
-                }
+                // Не добавляем мусор, только значимый текст
+                if (line.Text.Length > 2)
+                    sb.AppendLine(line.Text);
             }
-            catch (Exception ex)
+
+            return (sb.ToString(), true);
+        }
+
+        private bool CheckIfScreenChanged(Bitmap bmp)
+        {
+            // Берем пиксель из центра для теста (в реале нужен хэш всей картинки, но это для скорости)
+            var pixel = bmp.GetPixel(bmp.Width / 2, bmp.Height / 2);
+            byte[] currentHash = { (byte)pixel.R, (byte)pixel.G, (byte)pixel.B };
+
+            bool changed = false;
+            if (_lastScreenHash.Length == 0 ||
+                currentHash[0] != _lastScreenHash[0] ||
+                currentHash[1] != _lastScreenHash[1])
             {
-                return $"[Ошибка OCR: {ex.Message}]";
+                changed = true;
             }
+
+            _lastScreenHash = currentHash;
+            return changed;
         }
     }
 }

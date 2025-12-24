@@ -11,7 +11,7 @@ namespace FluxCore
         private readonly HttpClient _httpClient = new HttpClient();
         // 🔥 ИЗМЕНЕНО: Используем стабильный эндпоинт v1 вместо v1beta
         // Это убирает ошибку 404 для Tier 1 аккаунтов
-        private const string Endpoint = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent";
+        private const string Endpoint = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
         public GeminiService(string apiKey)
         {
             _apiKey = apiKey;
@@ -68,6 +68,17 @@ namespace FluxCore
             {
                 return $"💀 КРИТИЧЕСКИЙ СБОЙ: {ex.Message}";
             }
+        }
+        // Добавь внутрь класса GeminiService
+        public async Task<string> AskSimple(string prompt)
+        {
+            // ... (Твой стандартный код отправки JSON в v1 Endpoint) ...
+            // Используй тот же v1 gemini-1.5-flash endpoint
+            // Верни просто текст
+            // (Код отправки такой же, как в AskContextAware, просто payload проще)
+
+            // ВРЕМЕННАЯ ЗАГЛУШКА ДЛЯ ПРИМЕРА (ЗАМЕНИ НА РЕАЛЬНЫЙ HTTP CALL):
+            return await AskContextAware(prompt, "", "", "");
         }
     }
 }
