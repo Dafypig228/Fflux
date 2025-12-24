@@ -41,7 +41,7 @@ namespace FluxCore
                 generationConfig = new
                 {
                     temperature = 1, // Немного креативности
-                    maxOutputTokens = 1024
+                    maxOutputTokens = 8024
                 }
             };
             var json = JsonSerializer.Serialize(payload);
