@@ -30,10 +30,11 @@ namespace FluxCore
 
     public partial class MainWindow : Window
     {
+        // --- МОЗГИ (Они определены в CoreArchitecture.cs или ниже) ---
+        private SensoryCortex? _cortex;
+        private NeuralLink? _neuralLink;
+        private OmniLoop? _omniLoop;
         private AudioService? _audioService;
-        private ScreenService? _screenService;
-        private ContextService? _contextService;
-        private GeminiService? _geminiService;
 
         private bool _isProcessing = false;
         private bool _isSecondary = false;
@@ -41,18 +42,13 @@ namespace FluxCore
         private bool _requireWakeWord = true;
         private string _panelName = "Flux ai";
 
-        private string _debugLastMeta = "";
-        private string _debugLastOCR = "";
         private StringBuilder _voiceLog = new StringBuilder();
-
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
 
-        // --- WINAPI ДЛЯ HOTKEY И ALT+TAB ---
+        // WINAPI
         private const int HOTKEY_ID = 9000;
         private const uint MOD_ALT = 0x0001;
         private const uint VK_F = 0x46;
-
-        // Константы для скрытия из Alt+Tab
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
@@ -79,7 +75,6 @@ namespace FluxCore
 
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
-            // 1. ПРИМЕНЯЕМ СТИЛЬ TOOLWINDOW (Убирает из Alt+Tab)
             HideFromAltTab();
 
             if (!_isSecondary)
@@ -112,7 +107,6 @@ namespace FluxCore
             if (!_isSecondary) FadeIn();
         }
 
-        // --- ЛОГИКА СКРЫТИЯ ИЗ ALT+TAB ---
         private void HideFromAltTab()
         {
             var helper = new WindowInteropHelper(this);
@@ -124,12 +118,18 @@ namespace FluxCore
         {
             try
             {
-                _contextService = new ContextService();
-                _screenService = new ScreenService();
-                _geminiService = new GeminiService("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs");
+                // 1. Инициализация Мозгов
+                // Если ты не создал файл CoreArchitecture.cs, убедись, что классы SensoryCortex и OmniLoop есть в проекте!
+                _cortex = new SensoryCortex();
+                _neuralLink = new NeuralLink("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs");
+                _omniLoop = new OmniLoop(_cortex, _neuralLink);
 
+                // 2. Инициализация Аудио
                 _audioService = new AudioService();
+
+                // ИСПРАВЛЕНИЕ AWAIT: Добавили async/await в лямбду
                 _audioService.OnFinalText += async (text) => await ProcessRequest(text);
+
                 _audioService.OnError += (err) => Dispatcher.Invoke(() => AddMessage($"Audio Error: {err}", false));
 
                 if (_isMicOn) _audioService.StartContinuousRecording();
@@ -146,6 +146,7 @@ namespace FluxCore
 
             string cleanVoice = userVoice.Trim();
 
+            // Фильтр Wake Word
             if (_requireWakeWord && !InputBox.IsKeyboardFocused)
             {
                 bool nameCalled = cleanVoice.StartsWith(_panelName, StringComparison.OrdinalIgnoreCase);
@@ -158,22 +159,14 @@ namespace FluxCore
             _isProcessing = true;
 
             Dispatcher.Invoke(() => AddMessage(cleanVoice, true));
-            if (!_isSecondary) Dispatcher.Invoke(() => StatusText.Text = "Analyzing...");
+            if (!_isSecondary) Dispatcher.Invoke(() => StatusText.Text = "OmniLoop Processing...");
 
             try
             {
-                if (_contextService == null || _screenService == null || _geminiService == null)
-                    throw new Exception("Services Not Initialized");
+                if (_omniLoop == null) throw new Exception("Core Offline");
 
-                string meta = _contextService.GetLayer1_Metadata(out bool chg);
-                string ui = _contextService.GetLayer3_UIHierarchy();
-                var ocr = await _screenService.GetLayer2_OCR_WithDelta();
-                string screenText = ocr.VisualChanged ? ocr.Text : "[No Visual Changes]";
-
-                _debugLastMeta = $"Meta: {meta}\nUI: {ui}";
-                _debugLastOCR = screenText;
-
-                string answer = await _geminiService.AskContextAware(cleanVoice, meta, ui, screenText);
+                // Вызов OmniLoop
+                string answer = await _omniLoop.UserQuery(cleanVoice);
 
                 Dispatcher.Invoke(() => {
                     AddMessage(answer, false);
@@ -186,7 +179,6 @@ namespace FluxCore
         }
 
         // --- UI HANDLERS ---
-
         private void Btn_ShowLogs_Click(object sender, RoutedEventArgs e)
         {
             LogTextBox.Text = _voiceLog.ToString();
@@ -194,27 +186,27 @@ namespace FluxCore
             SettingsPanel.Visibility = Visibility.Collapsed;
         }
 
-        private void Btn_CloseLogs_Click(object sender, RoutedEventArgs e)
-        {
-            LogOverlay.Visibility = Visibility.Collapsed;
-        }
+        private void Btn_CloseLogs_Click(object sender, RoutedEventArgs e) => LogOverlay.Visibility = Visibility.Collapsed;
 
         private void Btn_DebugDump_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                string dump = $"--- FLUX CORE DEBUG DUMP ---\nTime: {DateTime.Now}\nPanel: {_panelName}\n\n[WINDOW CONTEXT]\n{_debugLastMeta}\n\n[SCREEN OCR]\n{_debugLastOCR}\n";
+                // Безопасное получение данных через null-check (?.)
+                string meta = _cortex?.GetActiveWindow() ?? "N/A";
                 string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug_prompt.txt");
-                File.WriteAllText(path, dump);
+                File.WriteAllText(path, $"DEBUG DUMP:\nWindow: {meta}\nVoice Log:\n{_voiceLog}");
+
                 Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
             }
             catch { AddMessage("Could not save debug dump.", false); }
         }
 
-        private void Btn_DebugOCR_Click(object sender, RoutedEventArgs e)
+        private async void Btn_DebugOCR_Click(object sender, RoutedEventArgs e)
         {
-            string preview = _debugLastOCR.Length > 200 ? _debugLastOCR.Substring(0, 200) + "..." : _debugLastOCR;
-            AddMessage($"[OCR DATA]:\n{preview}", false);
+            string visual = _cortex != null ? await _cortex.GetVisualContext() : "Offline";
+            string preview = visual.Length > 200 ? visual.Substring(0, 200) + "..." : visual;
+            AddMessage($"[OCR VISION]:\n{preview}", false);
         }
 
         private void Btn_ResetAudio_Click(object sender, RoutedEventArgs e)
@@ -227,39 +219,41 @@ namespace FluxCore
             AddMessage("System: Audio Engine Restarted.", false);
         }
 
-        private void Btn_Send_Click(object sender, RoutedEventArgs e) { if (!string.IsNullOrWhiteSpace(InputBox.Text)) { ProcessRequest(InputBox.Text); InputBox.Clear(); } }
+        private void Btn_Send_Click(object sender, RoutedEventArgs e)
+        {
+            if (InputBox != null && !string.IsNullOrWhiteSpace(InputBox.Text))
+            {
+                // Вызываем асинхронно, но в void методе можно не ждать (fire and forget)
+                // Или можно сделать async void Btn_Send_Click
+                _ = ProcessRequest(InputBox.Text);
+                InputBox.Clear();
+            }
+        }
         private void InputBox_KeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) Btn_Send_Click(sender, e); }
         private void NameBox_TextChanged(object sender, TextChangedEventArgs e) { _panelName = NameBox.Text; TitleText.Text = _panelName.ToUpper(); }
 
-        private void WakeWord_Changed(object sender, RoutedEventArgs e)
-        {
-            _requireWakeWord = WakeWordCheck.IsChecked == true;
-        }
-
-        private void Btn_NewPanel_Click(object sender, RoutedEventArgs e)
-        {
-            var p = new MainWindow(true, "Flux Unit");
-            p.Left = this.Left + 40; p.Top = this.Top + 40;
-            p.Show();
-        }
-
+        private void WakeWord_Changed(object sender, RoutedEventArgs e) { _requireWakeWord = WakeWordCheck.IsChecked == true; }
+        private void Btn_NewPanel_Click(object sender, RoutedEventArgs e) { var p = new MainWindow(true, "Flux Unit"); p.Left = this.Left + 40; p.Top = this.Top + 40; p.Show(); }
         private void Btn_Mic_Click(object sender, RoutedEventArgs e) => ToggleMic(!_isMicOn);
         private void ToggleMic(bool state) { _isMicOn = state; if (_isMicOn) _audioService?.StartContinuousRecording(); else _audioService?.Stop(); UpdateMicButtonVisuals(); }
         private void UpdateMicButtonVisuals() { if (BtnMic == null) return; BtnMic.Content = _isMicOn ? "🎤 ON" : "MIC OFF"; BtnMic.Foreground = _isMicOn ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : Brushes.Gray; }
-
-        private void Btn_Exit_Click(object sender, RoutedEventArgs e)
-        {
-            if (!_isSecondary) Environment.Exit(0);
-            else this.Close();
-        }
+        private void Btn_Exit_Click(object sender, RoutedEventArgs e) { if (!_isSecondary) Environment.Exit(0); else this.Close(); }
 
         private void AddMessage(string text, bool isUser)
         {
             Messages.Add(new ChatMessage { Text = text, IsUser = isUser });
+
+            // Надежный авто-скролл вниз
             if (VisualTreeHelper.GetChildrenCount(ChatList) > 0)
             {
                 var border = VisualTreeHelper.GetChild(ChatList, 0) as Border;
-                if (border != null) { var sv = VisualTreeHelper.GetChild(border, 0) as ScrollViewer; sv?.ScrollToBottom(); }
+                if (border != null)
+                {
+                    var scrollViewer = VisualTreeHelper.GetChild(border, 0) as ScrollViewer;
+                    // Принудительно обновляем лейаут, чтобы скролл узнал о новом размере текста
+                    scrollViewer?.UpdateLayout();
+                    scrollViewer?.ScrollToBottom();
+                }
             }
         }
 
@@ -277,40 +271,8 @@ namespace FluxCore
         public void FadeIn() { BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200))); }
         public void FadeOut() { var a = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200)); a.Completed += (s, e) => Visibility = Visibility.Hidden; BeginAnimation(OpacityProperty, a); }
 
-        private void LoadConfig()
-        {
-            try
-            {
-                if (File.Exists("config.json"))
-                {
-                    var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText("config.json"));
-                    if (cfg != null)
-                    {
-                        SliderR.Value = cfg.R; SliderG.Value = cfg.G; SliderB.Value = cfg.B; SliderAlpha.Value = cfg.Alpha;
-                        _panelName = cfg.Name ?? "Flux ai"; NameBox.Text = _panelName; TitleText.Text = _panelName.ToUpper();
-                        _requireWakeWord = cfg.RequireWakeWord;
-                        WakeWordCheck.IsChecked = _requireWakeWord;
-                    }
-                }
-            }
-            catch { }
-        }
-        private void SaveConfig()
-        {
-            if (!_isSecondary) try
-                {
-                    File.WriteAllText("config.json", JsonSerializer.Serialize(new AppConfig
-                    {
-                        R = SliderR.Value,
-                        G = SliderG.Value,
-                        B = SliderB.Value,
-                        Alpha = SliderAlpha.Value,
-                        Name = _panelName,
-                        RequireWakeWord = _requireWakeWord
-                    }));
-                }
-                catch { }
-        }
+        private void LoadConfig() { try { if (File.Exists("config.json")) { var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText("config.json")); if (cfg != null) { SliderR.Value = cfg.R; SliderG.Value = cfg.G; SliderB.Value = cfg.B; SliderAlpha.Value = cfg.Alpha; _panelName = cfg.Name ?? "Flux ai"; NameBox.Text = _panelName; TitleText.Text = _panelName.ToUpper(); _requireWakeWord = cfg.RequireWakeWord; WakeWordCheck.IsChecked = _requireWakeWord; } } } catch { } }
+        private void SaveConfig() { if (!_isSecondary) try { File.WriteAllText("config.json", JsonSerializer.Serialize(new AppConfig { R = SliderR.Value, G = SliderG.Value, B = SliderB.Value, Alpha = SliderAlpha.Value, Name = _panelName, RequireWakeWord = _requireWakeWord })); } catch { } }
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); }
     }
 }

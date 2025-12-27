@@ -3,82 +3,99 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+
 namespace FluxCore
 {
     public class GeminiService
     {
         private readonly string _apiKey;
         private readonly HttpClient _httpClient = new HttpClient();
-        // 🔥 ИЗМЕНЕНО: Используем стабильный эндпоинт v1 вместо v1beta
-        // Это убирает ошибку 404 для Tier 1 аккаунтов
+
+        // Используем модель 1.5 Flash (быстрая и умная)
         private const string Endpoint = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
+
         public GeminiService(string apiKey)
         {
             _apiKey = apiKey;
-            // Увеличим таймаут, на платном тире можно ждать качественный ответ
-            _httpClient.Timeout = TimeSpan.FromSeconds(30);
+            _httpClient.Timeout = TimeSpan.FromSeconds(60);
         }
+
+        // --- 1. УМНЫЙ МЕТОД (С КОНТЕКСТОМ) ---
         public async Task<string> AskContextAware(string userVoice, string appMeta, string mouseFocus, string screenText)
         {
-            // Собираем промпт с учетом твоей логики Context-Aware
+            // Формируем "Божественный промпт" для глубокого анализа
             var fullPrompt = $@"
-ТЫ — FLUXCORE. Твоя задача — понимать контекст экрана.
-ДАННЫЕ:
-1. ПРИЛОЖЕНИЕ: {appMeta}
-2. МЫШЬ НАВЕДЕНА НА: {mouseFocus}
-3. ТЕКСТ ЭКРАНА: {screenText}
-ЗАПРОС: ""{userVoice}""
-Ответь кратко и по делу на русском языке.";
+SYSTEM: FLUXCORE OS INTEGRATION.
+MODE: DEEP ANALYSIS.
+
+--- INPUT DATA STREAM ---
+[ACTIVE PROCESS]
+{appMeta}
+
+[VISUAL OCR DATA]
+{screenText}
+
+[UI AUTOMATION TREE]
+{mouseFocus}
+
+--- USER REQUEST ---
+'{userVoice}'
+
+--- INSTRUCTIONS ---
+Ты — технический ассистент Flux. 
+1. Проанализируй иерархию элементов (UI TREE).
+2. Используй данные OCR, чтобы понять контекст экрана.
+3. Отвечай развернуто и технически грамотно.
+4. Если пользователь спрашивает 'Что это?', используй данные о элементе под курсором.";
+
+            return await SendRequest(fullPrompt);
+        }
+
+        // --- 2. ПРОСТОЙ МЕТОД (FIX ДЛЯ ОШИБКИ) ---
+        // Этот метод нужен, чтобы твой старый код не ломался
+        public async Task<string> AskSimple(string prompt)
+        {
+            return await SendRequest(prompt);
+        }
+
+        // --- ВНУТРЕННЯЯ ОТПРАВКА ---
+        private async Task<string> SendRequest(string promptText)
+        {
             var payload = new
             {
                 contents = new[]
                 {
-                    new
-                    {
-                        parts = new[] { new { text = fullPrompt } }
-                    }
+                    new { parts = new[] { new { text = promptText } } }
                 },
                 generationConfig = new
                 {
-                    temperature = 1, // Немного креативности
-                    maxOutputTokens = 8024
+                    temperature = 0.4,
+                    maxOutputTokens = 100000
                 }
             };
+
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
+
             try
             {
-                // Шлем запрос в v1 эндпоинт
                 var response = await _httpClient.PostAsync($"{Endpoint}?key={_apiKey}", content);
                 var responseStr = await response.Content.ReadAsStringAsync();
-                if (!response.IsSuccessStatusCode)
-                {
-                    // Если всё равно ошибка — выводим её полностью для дебага
-                    return $"⚠️ ОШИБКА ({response.StatusCode}):\n{responseStr}";
-                }
+
+                if (!response.IsSuccessStatusCode) return $"⚠️ API Error: {response.StatusCode}";
+
                 using var doc = JsonDocument.Parse(responseStr);
                 if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
                 {
                     var text = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
-                    return text?.Trim() ?? "ИИ вернул пустой ответ.";
+                    return text?.Trim() ?? "...";
                 }
-                return "Ответ не найден в JSON.";
+                return "Нет данных.";
             }
             catch (Exception ex)
             {
-                return $"💀 КРИТИЧЕСКИЙ СБОЙ: {ex.Message}";
+                return $"Error: {ex.Message}";
             }
-        }
-        // Добавь внутрь класса GeminiService
-        public async Task<string> AskSimple(string prompt)
-        {
-            // ... (Твой стандартный код отправки JSON в v1 Endpoint) ...
-            // Используй тот же v1 gemini-1.5-flash endpoint
-            // Верни просто текст
-            // (Код отправки такой же, как в AskContextAware, просто payload проще)
-
-            // ВРЕМЕННАЯ ЗАГЛУШКА ДЛЯ ПРИМЕРА (ЗАМЕНИ НА РЕАЛЬНЫЙ HTTP CALL):
-            return await AskContextAware(prompt, "", "", "");
         }
     }
 }

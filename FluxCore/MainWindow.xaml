@@ -161,11 +161,20 @@
                 </StackPanel>
             </Border>
 
-            <ListView x:Name="ChatList" Grid.Row="3" Background="Transparent" BorderThickness="0" Margin="0,5,0,5"
-                      ScrollViewer.HorizontalScrollBarVisibility="Disabled" BorderBrush="{x:Null}">
+            <ListView x:Name="ChatList" Grid.Row="3" 
+                      Background="Transparent" 
+                      BorderThickness="0" 
+                      Margin="0,5,0,0"
+                      Padding="10,10,10,50" 
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled" 
+                      ScrollViewer.VerticalScrollBarVisibility="Auto"
+                      ScrollViewer.CanContentScroll="False" 
+                      BorderBrush="{x:Null}">
+
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="Focusable" Value="False"/>
+                        <Setter Property="Margin" Value="0,3"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ListViewItem">
@@ -175,9 +184,10 @@
                         </Setter>
                     </Style>
                 </ListView.ItemContainerStyle>
+
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Border CornerRadius="10" Padding="12,8" Margin="0,3" MaxWidth="350">
+                        <Border CornerRadius="12" Padding="12,10" MaxWidth="380">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="HorizontalAlignment" Value="Left"/>
@@ -190,7 +200,17 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
-                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" Foreground="#F0F0F0" FontSize="13" FontFamily="Segoe UI"/>
+
+                            <TextBox Text="{Binding Text}" 
+                                     TextWrapping="Wrap" 
+                                     Foreground="#F0F0F0" 
+                                     FontSize="13" 
+                                     FontFamily="Segoe UI"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     IsReadOnly="True"
+                                     IsHitTestVisible="True" 
+                                     Cursor="IBeam"/>
                         </Border>
                     </DataTemplate>
                 </ListView.ItemTemplate>
