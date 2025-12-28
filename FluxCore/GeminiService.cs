@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -11,7 +12,7 @@ namespace FluxCore
         private readonly string _apiKey;
         private readonly HttpClient _httpClient = new HttpClient();
 
-        // Используем модель 1.5 Flash (быстрая и умная)
+        // Модель 1.5 Flash (быстрая и дешевая)
         private const string Endpoint = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
 
         public GeminiService(string apiKey)
@@ -20,39 +21,45 @@ namespace FluxCore
             _httpClient.Timeout = TimeSpan.FromSeconds(60);
         }
 
-        // --- 1. УМНЫЙ МЕТОД (С КОНТЕКСТОМ) ---
-        public async Task<string> AskContextAware(string userVoice, string appMeta, string mouseFocus, string screenText)
+        // --- 1. ГЛАВНЫЙ МЕТОД (С ПАМЯТЬЮ) ---
+        public async Task<string> AskContextAware(string userVoice, string appMeta, string mouseFocus, string screenText, List<string> memories, string clipboard)
         {
-            // Формируем "Божественный промпт" для глубокого анализа
-            var fullPrompt = $@"
-SYSTEM: FLUXCORE OS INTEGRATION.
-MODE: DEEP ANALYSIS.
+            string memoryBlock = (memories != null && memories.Count > 0) ? string.Join("\n", memories) : "NO DATA.";
 
---- INPUT DATA STREAM ---
-[ACTIVE PROCESS]
-{appMeta}
+            var systemPrompt = $@"
+SYSTEM: FLUX OS.
+MODE: PRECISE CURSOR ANALYSIS.
 
-[VISUAL OCR DATA]
+--- MEMORY ---
+{memoryBlock}
+
+--- VISUAL INPUTS ---
+1. ACTIVE APP: {appMeta}
+
+2. 🎯 MOUSE FOCUS (EXACT OBJECT UNDER CURSOR):
+{mouseFocus}
+
+3. 🖼️ SCREEN AREA TEXT (400px RADIUS AROUND CURSOR):
 {screenText}
 
-[UI AUTOMATION TREE]
-{mouseFocus}
+4. CLIPBOARD:
+{clipboard}
 
 --- USER REQUEST ---
 '{userVoice}'
 
---- INSTRUCTIONS ---
-Ты — технический ассистент Flux. 
-1. Проанализируй иерархию элементов (UI TREE).
-2. Используй данные OCR, чтобы понять контекст экрана.
-3. Отвечай развернуто и технически грамотно.
-4. Если пользователь спрашивает 'Что это?', используй данные о элементе под курсором.";
+--- RULES ---
+1. Identify the 'MOUSE FOCUS' object.
+2. WARNING: If 'MOUSE FOCUS' says ""BLOCKED BY OVERLAY"", IGNORE IT completely. 
+   Instead, rely 100% on 'SCREEN AREA TEXT' and 'ACTIVE APP' to guess what is under the cursor.
+3. If the user points at a chat, name the chat (from OCR or container info).
+4. Be concise.";
 
-            return await SendRequest(fullPrompt);
+            return await SendRequest(systemPrompt);
         }
 
-        // --- 2. ПРОСТОЙ МЕТОД (FIX ДЛЯ ОШИБКИ) ---
-        // Этот метод нужен, чтобы твой старый код не ломался
+        // --- 2. ПРОСТОЙ МЕТОД (FIX ОШИБКИ) ---
+        // Мы возвращаем этот метод, чтобы старый код не ломался
         public async Task<string> AskSimple(string prompt)
         {
             return await SendRequest(prompt);
@@ -63,15 +70,7 @@ MODE: DEEP ANALYSIS.
         {
             var payload = new
             {
-                contents = new[]
-                {
-                    new { parts = new[] { new { text = promptText } } }
-                },
-                generationConfig = new
-                {
-                    temperature = 0.4,
-                    maxOutputTokens = 100000
-                }
+                contents = new[] { new { parts = new[] { new { text = promptText } } } }
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -87,10 +86,11 @@ MODE: DEEP ANALYSIS.
                 using var doc = JsonDocument.Parse(responseStr);
                 if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
                 {
-                    var text = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
-                    return text?.Trim() ?? "...";
+                    // Безопасное получение текста (fix null reference warning)
+                    var textElement = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text");
+                    return textElement.GetString()?.Trim() ?? "...";
                 }
-                return "Нет данных.";
+                return "Нет данных от ИИ.";
             }
             catch (Exception ex)
             {

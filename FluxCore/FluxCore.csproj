@@ -7,9 +7,11 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Platforms>x64</Platforms>
 		<NoWarn>$(NoWarn);MSB3276;MSB3277;CA1416</NoWarn>
+		<UseWindowsForms>true</UseWindowsForms>
 	</PropertyGroup>
 
 	<ItemGroup>
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.1" />
 		<PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.1.1" />
 		<PackageReference Include="Microsoft.CognitiveServices.Speech" Version="1.42.0" />
 		<PackageReference Include="System.Speech" Version="9.0.0" />

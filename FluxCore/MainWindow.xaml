@@ -1,7 +1,7 @@
 ﻿<Window x:Class="FluxCore.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="FluxCore Hub" 
+        Title="FluxCore Hub"
         Width="460"
         SizeToContent="Height" 
         MinHeight="250" MaxHeight="800"
@@ -13,6 +13,7 @@
         ResizeMode="CanResizeWithGrip"
         Opacity="0" 
         Closing="Window_Closing">
+    
 
     <Window.Resources>
         <Style x:Key="CleanBtn" TargetType="Button">
@@ -187,7 +188,7 @@
 
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Border CornerRadius="12" Padding="12,10" MaxWidth="380">
+                        <Border CornerRadius="12" Padding="12,10" Margin="0,0,15,0">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="HorizontalAlignment" Value="Left"/>
@@ -209,8 +210,7 @@
                                      Background="Transparent"
                                      BorderThickness="0"
                                      IsReadOnly="True"
-                                     IsHitTestVisible="True" 
-                                     Cursor="IBeam"/>
+                                     IsHitTestVisible="True"/>
                         </Border>
                     </DataTemplate>
                 </ListView.ItemTemplate>
@@ -222,7 +222,7 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="InputBox" Style="{StaticResource GlassBox}" KeyDown="InputBox_KeyDown" VerticalContentAlignment="Center"/>
+                    <TextBox x:Name="InputBox" Style="{StaticResource GlassBox}" VerticalContentAlignment="Center"/>
                     <Button Grid.Column="1" Content="➤" Click="Btn_Send_Click" Style="{StaticResource CleanBtn}" Foreground="#00FFD1" Width="35" Height="35" Padding="0"/>
                 </Grid>
             </Border>
