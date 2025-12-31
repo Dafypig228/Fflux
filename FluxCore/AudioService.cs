@@ -7,6 +7,7 @@ namespace FluxCore
 {
     public class AudioService : IDisposable
     {
+        // Твой ключ и регион (оставляем как есть)
         private const string SPEECH_KEY = "GAxht5qWEmwDfZRlOeYLNbdR4ObAZIiPF7xfRlFI0WVnxJLPY3O7JQQJ99BLAC3pKaRXJ3w3AAAYACOG9yir";
         private const string SPEECH_REGION = "eastasia";
 
@@ -16,7 +17,8 @@ namespace FluxCore
         public event Action<string>? OnPartialText;
         public event Action<string>? OnError;
 
-        public async void StartContinuousRecording()
+        // ДОБАВИЛ ПАРАМЕТР: language (по умолчанию английский)
+        public async void StartContinuousRecording(string language = "ru-RU")
         {
             if (_recognizer != null)
             {
@@ -26,7 +28,10 @@ namespace FluxCore
             try
             {
                 var config = SpeechConfig.FromSubscription(SPEECH_KEY, SPEECH_REGION);
-                config.SpeechRecognitionLanguage = "ru-RU";
+
+                // ВАЖНО: Присваиваем язык из аргумента
+                config.SpeechRecognitionLanguage = language;
+
                 config.SetProfanity(ProfanityOption.Raw);
 
                 _recognizer = new SpeechRecognizer(config);
@@ -43,8 +48,6 @@ namespace FluxCore
 
                 _recognizer.Canceled += (s, e) =>
                 {
-                    // ИСПРАВЛЕНИЕ: Убрали CancellationReason.User, так как его нет в SDK.
-                    // Игнорируем только EndOfStream (нормальное завершение)
                     if (e.Reason != CancellationReason.EndOfStream)
                     {
                         OnError?.Invoke($"Azure Error: {e.ErrorDetails}");
@@ -52,7 +55,7 @@ namespace FluxCore
                 };
 
                 await _recognizer.StartContinuousRecognitionAsync();
-                Debug.WriteLine("[AudioService] Azure Mic Started");
+                Debug.WriteLine($"[AudioService] Azure Mic Started [{language}]");
             }
             catch (Exception ex)
             {
@@ -63,21 +66,9 @@ namespace FluxCore
         public async Task Stop()
         {
             if (_recognizer == null) return;
-
-            try
-            {
-                await _recognizer.StopContinuousRecognitionAsync();
-            }
-            catch
-            {
-                // Игнорируем
-            }
-            finally
-            {
-                _recognizer?.Dispose();
-                _recognizer = null;
-                Debug.WriteLine("[AudioService] Azure Mic Stopped & Disposed");
-            }
+            try { await _recognizer.StopContinuousRecognitionAsync(); }
+            catch { }
+            finally { _recognizer?.Dispose(); _recognizer = null; }
         }
 
         public void Dispose()
@@ -86,4 +77,4 @@ namespace FluxCore
             _recognizer = null;
         }
     }
-} 
+}

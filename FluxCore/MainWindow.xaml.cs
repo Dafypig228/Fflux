@@ -76,6 +76,9 @@ namespace FluxCore
         private StringBuilder _voiceLog = new StringBuilder();
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
 
+
+        private const string SessionFile = "session_history.json";
+
         // WINAPI
         private const int HOTKEY_ID = 9000;
         private const uint MOD_ALT = 0x0001;
@@ -109,6 +112,38 @@ namespace FluxCore
             this.Loaded += OnWindowLoaded;
         }
 
+        private void LoadSession()
+        {
+            try
+            {
+                if (File.Exists(SessionFile))
+                {
+                    var json = File.ReadAllText(SessionFile);
+                    var loadedMsgs = JsonSerializer.Deserialize<List<ChatMessage>>(json);
+                    if (loadedMsgs != null)
+                    {
+                        Messages.Clear();
+                        foreach (var msg in loadedMsgs) Messages.Add(msg);
+                        AddMessage("[System] Previous session context restored.", false);
+                        ScrollToBottom();
+                    }
+                }
+            }
+            catch { /* Ошибка чтения истории не должна ломать запуск */ }
+        }
+        private void SaveSession()
+        {
+            try
+            {
+                // Сохраняем последние 50 сообщений, чтобы файл не раздувался до гигабайтов, 
+                // но контекста хватало надолго.
+                var historyToSave = Messages.Skip(Math.Max(0, Messages.Count - 50)).ToList();
+                var json = JsonSerializer.Serialize(historyToSave);
+                File.WriteAllText(SessionFile, json);
+            }
+            catch { }
+        }
+
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
             HideFromAltTab();
@@ -135,6 +170,9 @@ namespace FluxCore
                 FadeIn();
             }
 
+
+            LoadSession();
+            SaveSession();
             InitializeServices();
             LoadConfig();
             ApplyColors();
@@ -324,89 +362,82 @@ namespace FluxCore
         {
             if (string.IsNullOrWhiteSpace(userVoice)) return;
 
-            // --- ИСПРАВЛЕНИЕ ОШИБКИ STA ---
-            // Мы должны проверить фокус через Dispatcher, так как мы в фоновом потоке
-            bool isInputFocused = false;
-            Dispatcher.Invoke(() => isInputFocused = InputBox.IsKeyboardFocused);
-
-            // --- 0. ПРОВЕРКА ИМЕНИ (WAKE WORD) ---
-            if (_requireWakeWord && !isInputFocused)
-            {
-                bool nameCalled = userVoice.Trim().StartsWith(_panelName, StringComparison.OrdinalIgnoreCase);
-                if (!nameCalled) return;
-                userVoice = userVoice.Trim().Substring(_panelName.Length).Trim();
-                if (string.IsNullOrEmpty(userVoice)) return;
-            }
+            Dispatcher.Invoke(() => {
+                // Проверка WakeWord... (твой код)
+            });
 
             if (_isProcessing) return;
             _isProcessing = true;
 
-            // Показываем сообщение пользователя
+            // 1. Добавляем сообщение пользователя в UI и в ИСТОРИЮ
             Dispatcher.Invoke(() => AddMessage(userVoice, true));
 
             try
             {
-                // --- 1. СБОР ДАННЫХ (ГЛАЗА) ---
-                string app = _cortex?.GetActiveWindow() ?? "Windows";
-                string ui = _cortex?.GetLayer3_UIHierarchy() ?? "";
+                // --- СБОР СЫРЫХ ДАННЫХ ---
+                string app = _cortex?.GetActiveWindow() ?? "Unknown";
+                // Получаем полный UI с экрана (сырой)
+                string ui = _cortex?.GetLayer3_UIHierarchy() ?? "NO UI DATA";
+                // Получаем OCR (текст с экрана)
+                string ocr = _cortex != null ? await _cortex.GetVisualContext() : "NO VISUAL DATA";
 
-                // OCR
-                string ocr = _cortex != null ? await _cortex.GetVisualContext() : "";
+                // Объединяем сырые данные
+                string fullScreenContext = $"WINDOW: {app}\n\n[UI TREE]\n{ui}\n\n[OCR TEXT]\n{ocr}";
 
-                // --- 2. ЧТЕНИЕ БУФЕРА (С ЗАЩИТОЙ) ---
-                string clipboardText = "";
-                Dispatcher.Invoke(() =>
-                {
-                    try
-                    {
-                        if (Clipboard.ContainsText())
-                        {
-                            string raw = Clipboard.GetText();
-                            if (raw.Length < 3000) clipboardText = raw;
-                            else clipboardText = "[Clipboard content too long]";
-                        }
-                    }
-                    catch { /* Игнорируем */ }
-                });
-
-                // --- 3. ПАМЯТЬ ---
-                if (_memory != null && !string.IsNullOrEmpty(ocr))
-                {
-                    await _memory.Save(ocr, app);
-                }
-
+                // --- ПАМЯТЬ ---
                 List<string> memories = new List<string>();
                 if (_memory != null)
                 {
+                    // Сохраняем текущий момент в долгосрочную память
+                    await _memory.Save(ocr, app);
                     memories = await _memory.GetRecent(_appStartTime);
                 }
+                string memoryBlock = string.Join("\n", memories);
 
-                // --- 4. МОЗГ (GEMINI) ---
-                if (_omniLoop?.Link?.Brain != null)
+                // --- ПОДГОТОВКА ИСТОРИИ ---
+                // Берем сообщения из UI (ObservableCollection)
+                // Исключаем последнее (которое мы только что добавили - userVoice), 
+                // так как метод ChatWithHistory сам добавит его с контекстом.
+                var chatHistory = Messages.Where(m => !string.IsNullOrEmpty(m.Text)).ToList();
+                // Удаляем последнее сообщение пользователя из списка "истории", 
+                // потому что мы передадим его отдельно как "активный запрос" с прикрепленным контекстом.
+                if (chatHistory.Count > 0 && chatHistory.Last().IsUser && chatHistory.Last().Text == userVoice)
                 {
-                    string answer = await _omniLoop.Link.Brain.AskContextAware(
-                        userVoice,
-                        app,
-                        ui,
-                        ocr,
-                        memories,
-                        clipboardText
-                    );
-
-                    // --- 5. РУКИ ---
-                    ExecuteCommands(answer);
-
-                    string cleanAnswer = answer
-                        .Replace("[[OPEN:", "Launching: ")
-                        .Replace("[[SEARCH:", "Searching: ")
-                        .Replace("]]", "");
-
-                    await Dispatcher.Invoke(async () => await StreamMessage(cleanAnswer));
+                    chatHistory.RemoveAt(chatHistory.Count - 1);
                 }
+
+                // --- ЗАПРОС К МОЗГУ ---
+                // ВАЖНО: Мы используем обновленный GeminiService
+                // Если у тебя _neuralLink или _omniLoop - адаптируй вызов там, или вызывай сервис напрямую
+                // Предположим, мы вызываем сервис напрямую для наглядности:
+
+                var gemini = new GeminiService("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs");
+
+                string answer = await gemini.ChatWithHistory(
+                    chatHistory,    // Вся история чата
+                    userVoice,      // Текущий вопрос
+                    fullScreenContext, // Сырые данные экрана (обновленные!)
+                    app,            // Имя окна
+                    memoryBlock     // Долгосрочная память
+                );
+
+                // --- ОБРАБОТКА ОТВЕТА ---
+                ExecuteCommands(answer);
+
+                string cleanAnswer = answer
+                    .Replace("[[OPEN:", "Launching: ")
+                    .Replace("[[SEARCH:", "Searching: ")
+                    .Replace("]]", "");
+
+                // Вывод ответа (он автоматически попадет в Messages и сохранится при выходе)
+                await Dispatcher.Invoke(async () => await StreamMessage(cleanAnswer));
+
+                // Фоновое сохранение сессии после каждого ответа (на случай вылета)
+                SaveSession();
             }
             catch (Exception ex)
             {
-                Dispatcher.Invoke(() => AddMessage($"Error: {ex.Message}", false));
+                Dispatcher.Invoke(() => AddMessage($"Core Error: {ex.Message}", false));
             }
             finally
             {

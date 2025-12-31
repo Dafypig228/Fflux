@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using System.Windows.Automation;
 using System.Drawing;
 using System.IO;
-using System.Windows.Forms; // Требует <UseWindowsForms>true</UseWindowsForms> в .csproj
+using System.Windows.Forms;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -43,9 +43,7 @@ namespace FluxCore
             return sb.ToString();
         }
 
-        // --- НОВЫЙ МЕТОД: TRUE VISION (СКРИНШОТ ДЛЯ GEMINI) ---
-        // Ты просил без скринов, но этот метод нужен, чтобы Flux мог "видеть" картинку, а не только текст.
-        // Я добавил его, чтобы GeminiService не ругался.
+        // --- TRUE VISION (СКРИНШОТ ДЛЯ GEMINI) ---
         public string GetScreenBase64()
         {
             try
@@ -59,7 +57,6 @@ namespace FluxCore
                     }
                     using (var ms = new MemoryStream())
                     {
-                        // Сжимаем средне, для скорости
                         var encoder = GetEncoder(System.Drawing.Imaging.ImageFormat.Jpeg);
                         var encoderParams = new System.Drawing.Imaging.EncoderParameters(1);
                         encoderParams.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 60L);
@@ -73,11 +70,10 @@ namespace FluxCore
         private System.Drawing.Imaging.ImageCodecInfo GetEncoder(System.Drawing.Imaging.ImageFormat format)
         {
             return System.Drawing.Imaging.ImageCodecInfo.GetImageDecoders().FirstOrDefault(c => c.FormatID == format.Guid)
-                   ?? System.Drawing.Imaging.ImageCodecInfo.GetImageDecoders()[0];
+                    ?? System.Drawing.Imaging.ImageCodecInfo.GetImageDecoders()[0];
         }
 
-        // ===== 1. UI ИЕРАРХИЯ (ТВОЙ КОД) =====
-        // ===== UI СТРУКТУРА: ЦЕЛЬ + КОНТЕКСТ =====
+        // ===== 1. UI ИЕРАРХИЯ (UIA) =====
         public string GetLayer3_UIHierarchy()
         {
             try
@@ -85,16 +81,13 @@ namespace FluxCore
                 StringBuilder result = new StringBuilder();
                 GetCursorPos(out POINT p);
 
-                // 1. ПОЛУЧАЕМ ЭЛЕМЕНТ ПРЯМО ПОД ПИКСЕЛЕМ КУРСОРА
                 var element = AutomationElement.FromPoint(new System.Windows.Point(p.X, p.Y));
 
                 if (element != null)
                 {
-                    // === ЭТО ТОЧКА УКАЗАНИЯ (САМОЕ ВАЖНОЕ) ===
                     result.AppendLine("=== 🎯 CURSOR POINTING AT (PRIORITY #1) ===");
                     result.AppendLine(GetElementDetails(element));
 
-                    // === ЭТО РОДИТЕЛЬ (ЧТОБЫ ПОНЯТЬ ГДЕ МЫ) ===
                     result.AppendLine("\n=== 📦 CONTAINER / PARENT (PRIORITY #2) ===");
                     try
                     {
@@ -102,8 +95,6 @@ namespace FluxCore
                         if (parent != null)
                         {
                             result.AppendLine(GetElementSummary(parent));
-
-                            // Можно добавить еще одного родителя повыше, для надежности
                             var grandParent = TreeWalker.ControlViewWalker.GetParent(parent);
                             if (grandParent != null) result.AppendLine($" (Inside: {GetElementSummary(grandParent)})");
                         }
@@ -139,7 +130,7 @@ namespace FluxCore
             try { return $"{element.Current.LocalizedControlType}: '{element.Current.Name}'"; } catch { return "Unknown"; }
         }
 
-        // ===== 2. МОЩНЫЙ OCR (ТВОЙ КОД) =====
+        // ===== 2. МОЩНЫЙ OCR (С РАСШИРЕННЫМ КОНТЕКСТОМ) =====
         public async Task<string> GetVisualContext()
         {
             if (_ocrEngine == null) return "[OCR Not Init]";
@@ -147,19 +138,31 @@ namespace FluxCore
 
             try
             {
-                // Активное окно
+                // 1. Активное окно (Оставляем, полезно для понимания приложения)
                 IntPtr hwnd = GetForegroundWindow();
                 if (GetWindowRect(hwnd, out RECT r))
                 {
                     result.AppendLine("=== ACTIVE WINDOW TEXT ===");
                     Rectangle rect = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
-                    result.AppendLine(await ScanRegion(rect));
+                    // Ограничиваем скан окна (иногда оно слишком большое и тормозит)
+                    if (rect.Width > 0 && rect.Height > 0)
+                        result.AppendLine(await ScanRegion(rect));
                 }
 
-                // Зона курсора
+                // 2. Зона курсора (ИЗМЕНЕНО НА WIDE MODE)
                 GetCursorPos(out POINT c);
-                result.AppendLine("\n=== CURSOR AREA TEXT ===");
-                result.AppendLine(await ScanRegion(new Rectangle(c.X - 150, c.Y - 150, 300, 300)));
+                result.AppendLine("\n=== CURSOR LINE CONTEXT ===");
+
+                // БЫЛО: Square 300x300 (обрезало длинные строки)
+                // Rectangle rectSquare = new Rectangle(c.X - 150, c.Y - 150, 300, 300);
+
+                // СТАЛО: Wide Strip 1200x80 (видит всю строку целиком)
+                int w = 1200;
+                int h = 80;
+                // Центрируем по X, центрируем по Y
+                Rectangle rectWide = new Rectangle(c.X - (w / 2), c.Y - (h / 2), w, h);
+
+                result.AppendLine(await ScanRegion(rectWide));
 
                 return result.ToString();
             }
@@ -171,6 +174,8 @@ namespace FluxCore
             try
             {
                 var screen = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
+
+                // Обрезаем границы, чтобы не вылезти за экран
                 int x = Math.Max(0, bounds.X);
                 int y = Math.Max(0, bounds.Y);
                 int w = Math.Min(bounds.Width, screen.Width - x);
@@ -199,14 +204,14 @@ namespace FluxCore
             catch { return ""; }
         }
 
-        // ===== 3. ПРОЦЕССЫ И СИСТЕМА (ТВОЙ КОД) =====
+        // ===== 3. ПРОЦЕССЫ И СИСТЕМА =====
         public string GetRunningProcesses()
         {
             try
             {
                 var procs = System.Diagnostics.Process.GetProcesses()
                     .Where(p => !string.IsNullOrEmpty(p.MainWindowTitle))
-                    .Take(30); // Берем топ 30, чтобы не спамить
+                    .Take(30);
                 return "PROCESSES: " + string.Join(", ", procs.Select(p => p.ProcessName));
             }
             catch { return ""; }

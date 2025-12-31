@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -7,12 +8,25 @@ using System.Threading.Tasks;
 
 namespace FluxCore
 {
+    // --- Вспомогательные классы для API ---
+    public class GeminiContent
+    {
+        public string role { get; set; }
+        public List<GeminiPart> parts { get; set; } = new List<GeminiPart>();
+    }
+
+    public class GeminiPart
+    {
+        public string text { get; set; }
+    }
+
     public class GeminiService
     {
         private readonly string _apiKey;
         private readonly HttpClient _httpClient = new HttpClient();
 
-        // Модель 1.5 Flash (быстрая и дешевая)
+        // Используем самую новую модель для лучшего контекста
+        // Если будет ошибка 404, верни "gemini-1.5-flash"
         private const string Endpoint = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
 
         public GeminiService(string apiKey)
@@ -21,56 +35,89 @@ namespace FluxCore
             _httpClient.Timeout = TimeSpan.FromSeconds(60);
         }
 
-        // --- 1. ГЛАВНЫЙ МЕТОД (С ПАМЯТЬЮ) ---
-        public async Task<string> AskContextAware(string userVoice, string appMeta, string mouseFocus, string screenText, List<string> memories, string clipboard)
+        // ==========================================
+        // 1. НОВЫЙ МЕТОД (С ПАМЯТЬЮ И ИСТОРИЕЙ)
+        // ==========================================
+        public async Task<string> ChatWithHistory(List<ChatMessage> history, string userNewInput, string screenContext, string activeApp, string memories)
         {
-            string memoryBlock = (memories != null && memories.Count > 0) ? string.Join("\n", memories) : "NO DATA.";
+            // 1. Формируем "Системный Промпт" (Контекст момента)
+            var systemInstruction = $@"
+[[SYSTEM OVERRIDE: FLUX OS]]
+ROLE: You are FLUX, an intelligent OS assistant.
+GOAL: Help the user, remember previous messages, and analyze the screen.
 
-            var systemPrompt = $@"
-SYSTEM: FLUX OS.
-MODE: PRECISE CURSOR ANALYSIS.
+[[CURRENT CONTEXT]]
+- APP: {activeApp}
+- TIME: {DateTime.Now:HH:mm}
+- MEMORY: {memories}
 
---- MEMORY ---
-{memoryBlock}
+[[VISUAL DATA (SCREEN)]]
+{screenContext}
 
---- VISUAL INPUTS ---
-1. ACTIVE APP: {appMeta}
+INSTRUCTIONS:
+1. Use the conversation history to understand context.
+2. Use 'VISUAL DATA' to see what the user sees.
+3. Be concise and direct.
+";
+            var contents = new List<GeminiContent>();
 
-2. 🎯 MOUSE FOCUS (EXACT OBJECT UNDER CURSOR):
-{mouseFocus}
+            // 2. Конвертируем историю чата в формат Gemini
+            if (history != null)
+            {
+                foreach (var msg in history)
+                {
+                    if (string.IsNullOrWhiteSpace(msg.Text)) continue;
+                    contents.Add(new GeminiContent
+                    {
+                        role = msg.IsUser ? "user" : "model",
+                        parts = new List<GeminiPart> { new GeminiPart { text = msg.Text } }
+                    });
+                }
+            }
 
-3. 🖼️ SCREEN AREA TEXT (400px RADIUS AROUND CURSOR):
-{screenText}
+            // 3. Добавляем ТЕКУЩИЙ запрос пользователя + Системный контекст (невидимо для чата)
+            // Мы вшиваем контекст прямо в последнее сообщение пользователя
+            string finalUserPrompt = $"{systemInstruction}\n\n[[USER REQUEST]]:\n{userNewInput}";
 
-4. CLIPBOARD:
-{clipboard}
+            contents.Add(new GeminiContent
+            {
+                role = "user",
+                parts = new List<GeminiPart> { new GeminiPart { text = finalUserPrompt } }
+            });
 
---- USER REQUEST ---
-'{userVoice}'
-
---- RULES ---
-1. Identify the 'MOUSE FOCUS' object.
-2. WARNING: If 'MOUSE FOCUS' says ""BLOCKED BY OVERLAY"", IGNORE IT completely. 
-   Instead, rely 100% on 'SCREEN AREA TEXT' and 'ACTIVE APP' to guess what is under the cursor.
-3. If the user points at a chat, name the chat (from OCR or container info).
-4. Be concise.";
-
-            return await SendRequest(systemPrompt);
+            return await SendPayload(contents);
         }
 
-        // --- 2. ПРОСТОЙ МЕТОД (FIX ОШИБКИ) ---
-        // Мы возвращаем этот метод, чтобы старый код не ломался
+        // ==========================================
+        // 2. СТАРЫЕ МЕТОДЫ (ДЛЯ СОВМЕСТИМОСТИ)
+        // ==========================================
+
+        // Тот самый метод, на который ругается компилятор
         public async Task<string> AskSimple(string prompt)
         {
-            return await SendRequest(prompt);
+            // Просто отправляем один запрос без истории
+            return await ChatWithHistory(new List<ChatMessage>(), prompt, "No screen data", "Unknown", "No memory");
         }
 
-        // --- ВНУТРЕННЯЯ ОТПРАВКА ---
-        private async Task<string> SendRequest(string promptText)
+        // Старый метод AskContextAware (на случай, если он вызывается из старого MainWindow)
+        public async Task<string> AskContextAware(string userVoice, string appMeta, string mouseFocus, string screenText, List<string> memories, string clipboard)
+        {
+            string fullScreen = $"Mouse: {mouseFocus}\nScreen: {screenText}\nClipboard: {clipboard}";
+            string memoryBlock = (memories != null) ? string.Join("\n", memories) : "";
+
+            // Перенаправляем на новый умный метод (но без истории чата, т.к. старый вызов её не передает)
+            return await ChatWithHistory(new List<ChatMessage>(), userVoice, fullScreen, appMeta, memoryBlock);
+        }
+
+        // ==========================================
+        // 3. ОТПРАВКА (ВНУТРЕННЯЯ ЛОГИКА)
+        // ==========================================
+        private async Task<string> SendPayload(object payloadObj)
         {
             var payload = new
             {
-                contents = new[] { new { parts = new[] { new { text = promptText } } } }
+                contents = payloadObj,
+                generationConfig = new { temperature = 1, maxOutputTokens = 2048 }
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -81,20 +128,20 @@ MODE: PRECISE CURSOR ANALYSIS.
                 var response = await _httpClient.PostAsync($"{Endpoint}?key={_apiKey}", content);
                 var responseStr = await response.Content.ReadAsStringAsync();
 
-                if (!response.IsSuccessStatusCode) return $"⚠️ API Error: {response.StatusCode}";
+                if (!response.IsSuccessStatusCode)
+                    return $"⚠️ Error {response.StatusCode}: {responseStr}";
 
                 using var doc = JsonDocument.Parse(responseStr);
                 if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
                 {
-                    // Безопасное получение текста (fix null reference warning)
-                    var textElement = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text");
-                    return textElement.GetString()?.Trim() ?? "...";
+                    var text = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
+                    return text?.Trim() ?? "...";
                 }
-                return "Нет данных от ИИ.";
+                return "No response.";
             }
             catch (Exception ex)
             {
-                return $"Error: {ex.Message}";
+                return $"Exception: {ex.Message}";
             }
         }
     }
