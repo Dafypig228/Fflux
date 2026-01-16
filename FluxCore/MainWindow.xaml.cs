@@ -57,12 +57,21 @@ namespace FluxCore
 
     public partial class MainWindow : Window
     {
-        // --- МОЗГИ (Они определены в CoreArchitecture.cs или ниже) ---
+        // --- МОЗГИ ---
         private SensoryCortex? _cortex;
-        private NeuralLink? _neuralLink;
-        private OmniLoop? _omniLoop;
+        // private NeuralLink? _neuralLink; // Удаляем старый линк
+        // private OmniLoop? _omniLoop;     // Удаляем старый цикл
         private AudioService? _audioService;
         private MemoryService? _memory;
+        private Hippocampus? _hippocampus; // NEW: Reflexion Memory
+        private GeminiService? _gemini;   // Единый сервис
+        private ExecutionAgent? _executor; // Execution Agent
+        private OrchestratorAgent? _orchestrator; // Orchestrator Agent
+        private WindowsAutomationAgent? _automation; // Windows Automation
+        private CodeExecutionAgent? _codeRunner; // Code Execution Sandbox
+        private ValidatorAgent? _validator; // NEW: Visual Validation
+        private JarvisCore? _jarvis; // NEW: JARVIS Intelligence Core
+        private ReflectionAgent? _reflection; // NEW: Error Recovery
         private System.Windows.Threading.DispatcherTimer _bgTimer;
         private string _lastWindowName = "";
         private DateTime _appStartTime = DateTime.Now;
@@ -71,13 +80,20 @@ namespace FluxCore
         private bool _isSecondary = false;
         private bool _isMicOn = false;
         private bool _requireWakeWord = false;
+        private bool _useJarvisMode = true; // NEW: Use intelligent JARVIS mode
         private string _panelName = "Flux ai";
+        
+        // Permission System
+        private TaskCompletionSource<bool>? _permissionResult;
+        private string _pendingAction = "";
+        private string _pendingTarget = "";
 
         private StringBuilder _voiceLog = new StringBuilder();
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
 
 
         private const string SessionFile = "session_history.json";
+        private const string API_KEY = "AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs"; // TODO: Move to config
 
         // WINAPI
         private const int HOTKEY_ID = 9000;
@@ -135,8 +151,7 @@ namespace FluxCore
         {
             try
             {
-                // Сохраняем последние 50 сообщений, чтобы файл не раздувался до гигабайтов, 
-                // но контекста хватало надолго.
+                // Сохраняем последние 50 сообщений
                 var historyToSave = Messages.Skip(Math.Max(0, Messages.Count - 50)).ToList();
                 var json = JsonSerializer.Serialize(historyToSave);
                 File.WriteAllText(SessionFile, json);
@@ -193,28 +208,55 @@ namespace FluxCore
             try
             {
                 // 1. Инициализация Мозгов
-                // Если ты не создал файл CoreArchitecture.cs, убедись, что классы SensoryCortex и OmniLoop есть в проекте!
                 _cortex = new SensoryCortex();
-                _neuralLink = new NeuralLink("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs");
-                _omniLoop = new OmniLoop(_cortex, _neuralLink);
+                _gemini = new GeminiService(API_KEY);
+                
+                // Внедряем Gemini в память
+                _memory = new MemoryService(_gemini);
+                
+                // NEW: Инициализация Оркестратора
+                _orchestrator = new OrchestratorAgent(_gemini);
+                
+                // NEW: Инициализация Windows Automation
+                _automation = new WindowsAutomationAgent();
+                _hippocampus = new Hippocampus();
 
                 // 2. Инициализация Аудио
                 _audioService = new AudioService();
 
-                _memory = new MemoryService();
-
                 _inputTimer = new System.Windows.Threading.DispatcherTimer();
                 _inputTimer.Tick += InputTimer_Tick;
-                _inputTimer.Interval = TimeSpan.FromMilliseconds(20); // Проверяем 50 раз в секунду
+                _inputTimer.Interval = TimeSpan.FromMilliseconds(20); 
                 _inputTimer.Start();
 
-                // ИСПРАВЛЕНИЕ AWAIT: Добавили async/await в лямбду
                 _audioService.OnFinalText += async (text) => await ProcessRequest(text);
-
                 _audioService.OnError += (err) => Dispatcher.Invoke(() => AddMessage($"Audio Error: {err}", false));
 
                 if (_isMicOn) _audioService.StartContinuousRecording();
-                if (!_isSecondary) AddMessage($"Flux Core Ready.", false);
+                if (!_isSecondary) AddMessage($"Flux Core Ready (Vector Memory Online).", false);
+
+                // NEW: Initialize JARVIS Core
+                _codeRunner = new CodeExecutionAgent();
+                _reflection = new ReflectionAgent(_gemini);
+                _validator = new ValidatorAgent(_gemini);
+                _jarvis = new JarvisCore(
+                    _gemini,
+                    _executor ?? new ExecutionAgent(),
+                    _automation,
+                    _codeRunner,
+                    _cortex,  // NEW: Pass cortex for element detection
+                    _hippocampus!,
+                    _validator!,
+                    () => _cortex?.GetScreenBase64() ?? "",
+                    () => _cortex?.GetActiveWindow() ?? "Unknown",
+                    (msg) => Dispatcher.InvokeAsync(() => AddMessage(msg, false))
+                );
+
+                // --- NEURO-HUD WIRING ---
+                _jarvis.OnStateChanged += (state) => Dispatcher.InvokeAsync(() => UpdateHudState(state));
+                _jarvis.OnThought += (thought) => Dispatcher.InvokeAsync(() => UpdateHudContent(thought));
+                _jarvis.OnAction += (action) => Dispatcher.InvokeAsync(() => UpdateHudAction(action));
+                _jarvis.OnValidation += (success, reason) => Dispatcher.InvokeAsync(() => UpdateHudValidation(success, reason));
 
                 _bgTimer = new System.Windows.Threading.DispatcherTimer();
                 _bgTimer.Tick += BackgroundMonitor_Tick;
@@ -222,6 +264,56 @@ namespace FluxCore
                 _bgTimer.Start();
             }
             catch (Exception ex) { AddMessage($"Init Failed: {ex.Message}", false); }
+        }
+
+        // --- NEURO-HUD METHODS ---
+        private void UpdateHudState(string state)
+        {
+            NeuroHudPanel.Visibility = Visibility.Visible;
+            if (StatusText != null) StatusText.Visibility = Visibility.Collapsed; // Hide old status
+            
+            HudStateText.Text = state;
+            
+            // Color coding
+            if (state == "THINKING") HudStateLight.Fill = Brushes.Cyan;
+            else if (state == "ACTING") HudStateLight.Fill = Brushes.Yellow;
+            else if (state == "VERIFYING") HudStateLight.Fill = Brushes.Magenta;
+            else if (state == "REFLECTING") HudStateLight.Fill = Brushes.Lime;
+
+            // Reset transient badges
+            HudValidationBadge.Visibility = Visibility.Collapsed;
+        }
+
+        private void UpdateHudContent(string thought)
+        {
+            HudContentText.Text = thought;
+            HudActionBox.Visibility = Visibility.Collapsed;
+        }
+
+        private void UpdateHudAction(string action)
+        {
+            HudActionBox.Visibility = Visibility.Visible;
+            HudActionText.Text = action;
+        }
+
+        private async void UpdateHudValidation(bool success, string reason)
+        {
+            HudValidationBadge.Visibility = Visibility.Visible;
+            if (success)
+            {
+                (HudValidationBadge.Child as TextBlock).Text = "👁️ VERIFIED";
+                (HudValidationBadge.Child as TextBlock).Foreground = Brushes.Lime;
+                HudValidationBadge.Background = new SolidColorBrush(Color.FromArgb(50, 0, 255, 0));
+            }
+            else
+            {
+                (HudValidationBadge.Child as TextBlock).Text = "❌ REJECTED";
+                (HudValidationBadge.Child as TextBlock).Foreground = Brushes.Red;
+                HudValidationBadge.Background = new SolidColorBrush(Color.FromArgb(50, 255, 0, 0));
+            }
+            
+            // Keep it visible for a moment
+            await Task.Delay(2000);
         }
 
         private async void BackgroundMonitor_Tick(object sender, EventArgs e)
@@ -239,30 +331,17 @@ namespace FluxCore
                 {
                     // Собираем МЕГА-КОНТЕКСТ
                     StringBuilder fullContext = new StringBuilder();
-
                     fullContext.AppendLine($"[EVENT] Focus switched to: {currentWindow}");
-
-                    // Добавляем UI (структуру кнопок)
                     fullContext.AppendLine("[UI TREE]");
                     fullContext.AppendLine(_cortex.GetLayer3_UIHierarchy());
-
-                    // Добавляем Текст (OCR)
-                    fullContext.AppendLine("[VISUAL TEXT]");
-                    // Тут await важен, так как OCR требует времени
-                    fullContext.AppendLine(await _cortex.GetVisualContext());
-
-                    // Добавляем Процессы
-                    fullContext.AppendLine("[SYSTEM STATE]");
-                    fullContext.AppendLine(_cortex.GetRunningProcesses());
-                    fullContext.AppendLine(_cortex.GetSystemInfo());
+                    
+                    // !!! ВАЖНО: Тут мы НЕ делаем тяжелый OCR каждый раз, чтобы не тормозить.
+                    // fullContext.AppendLine(await _cortex.GetVisualContext());
 
                     // Записываем в базу
                     await _memory.Save(fullContext.ToString(), currentWindow);
 
                     _lastWindowName = currentWindow;
-
-                    // Для отладки (можно убрать)
-                    // System.Diagnostics.Debug.WriteLine($"[SNAPSHOT SAVED] {currentWindow}");
                 }
             }
             catch { /* Игнорируем ошибки фона */ }
@@ -283,13 +362,13 @@ namespace FluxCore
         }
 
         // 3. ИЗМЕНЕНИЕ: Обработка отпускания (ВЫКЛЮЧИТЬ МИКРОФОН)
+        private const int VK_RMENU = 0xA5; // Right Alt
         private void InputTimer_Tick(object? sender, EventArgs e)
         {
-            // Проверяем физическое состояние Левого Ctrl
-            // (GetAsyncKeyState работает везде, даже если окно свернуто)
-            bool isCtrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
+            // Check Right Alt (VK_RMENU)
+            bool isHotkeyDown = (GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
 
-            if (isCtrlDown)
+            if (isHotkeyDown)
             {
                 // Если нажали и микрофон еще не включен
                 if (!_isMicOn && !_isProcessing)
@@ -374,60 +453,347 @@ namespace FluxCore
 
             try
             {
+                // === ORCHESTRATOR: Check if we need planning ===
+                if (_orchestrator != null && _orchestrator.ShouldUsePlanning(userVoice))
+                {
+                    System.Diagnostics.Debug.WriteLine("[ORCHESTRATOR] Complex task detected, analyzing...");
+                    Dispatcher.Invoke(() => StatusText.Text = "🧠 Planning...");
+                    
+                    string quickContext = $"App: {_cortex?.GetActiveWindow() ?? "Unknown"}";
+                    var plan = await _orchestrator.AnalyzeAndPlanAsync(userVoice, quickContext);
+                    
+                    System.Diagnostics.Debug.WriteLine($"[ORCHESTRATOR] Plan: Intent={plan.Intent}, Steps={plan.Steps?.Count ?? 0}");
+                    
+                    // If Orchestrator has a direct response (simple conversation)
+                    if (!string.IsNullOrEmpty(plan.DirectResponse) && plan.Intent == "conversation")
+                    {
+                        await Dispatcher.Invoke(async () => await StreamMessage(plan.DirectResponse));
+                        _isProcessing = false;
+                        return;
+                    }
+                    
+                    // Inject plan into the request context
+                    string planContext = $"[ORCHESTRATOR PLAN]: Intent={plan.Intent}";
+                    if (plan.Steps != null && plan.Steps.Count > 0)
+                    {
+                        planContext += $", Steps: {string.Join(" -> ", plan.Steps.ConvertAll(s => s.Tool))}";
+                    }
+                    userVoice = $"{userVoice}\n\n{planContext}";
+                    
+                    Dispatcher.Invoke(() => StatusText.Text = "Processing...");
+                }
+
+                // ============================================
+                // NEW: JARVIS MODE - Intelligent execution with retry
+                // ============================================
+                if (_useJarvisMode && _jarvis != null)
+                {
+                    System.Diagnostics.Debug.WriteLine("[JARVIS] Using intelligent execution mode");
+                    Dispatcher.Invoke(() => StatusText.Text = "🤖 JARVIS Active...");
+                    
+                    // Hide window for screenshot
+                    Dispatcher.Invoke(() => this.Opacity = 0);
+                    await Task.Delay(100);
+                    
+                    try
+                    {
+                        // Run JARVIS on a background thread to prevent UI freezing
+                        string result = await Task.Run(async () => 
+                        {
+                            return await _jarvis.ExecuteTaskAsync(userVoice);
+                        });
+                        
+                        // Show window again
+                        Dispatcher.Invoke(() => this.Opacity = 1);
+                        
+                        // Display result
+                        await Dispatcher.Invoke(async () => await StreamMessage(result));
+                        SaveSession();
+                    }
+                    finally
+                    {
+                        Dispatcher.Invoke(() => this.Opacity = 1);
+                        _isProcessing = false;
+                    }
+                    return;
+                }
+
+
+                // ============================================
+                // LEGACY MODE: Original command parsing (fallback)
+                // ============================================
+
                 // --- СБОР СЫРЫХ ДАННЫХ ---
                 string app = _cortex?.GetActiveWindow() ?? "Unknown";
                 // Получаем полный UI с экрана (сырой)
                 string ui = _cortex?.GetLayer3_UIHierarchy() ?? "NO UI DATA";
-                // Получаем OCR (текст с экрана)
-                string ocr = _cortex != null ? await _cortex.GetVisualContext() : "NO VISUAL DATA";
+                
+                // === VISION UPGRADE ===
+                // СКРЫВАЕМ ОКНО FLUX ПЕРЕД СНИМКОМ
+                string screenBase64 = "";
+                if (_cortex != null)
+                {
+                    // ВАЖНО: Используем Invoke (не InvokeAsync) чтобы дождаться результата
+                    Dispatcher.Invoke(() => 
+                    {
+                        var originalOpacity = this.Opacity;
+                        this.Opacity = 0;
+                    });
+                    
+                    // Даем время рендереру
+                    await Task.Delay(100);
+                    
+                    // Снимок БЕЗ нашего окна
+                    screenBase64 = _cortex.GetScreenBase64();
+                    
+                    // Возвращаем видимость
+                    Dispatcher.Invoke(() => this.Opacity = 1);
+                }
+                
+                // Дополнительный контекст: процессы
+                string processes = _cortex?.GetRunningProcesses() ?? "";
 
-                // Объединяем сырые данные
-                string fullScreenContext = $"WINDOW: {app}\n\n[UI TREE]\n{ui}\n\n[OCR TEXT]\n{ocr}";
+                // Формируем текстовый контекст для "Системного промпта"
+                string textContext = $"WINDOW: {app}\n\n[UI TREE]\n{ui}\n\n[PROCESSES]\n{processes}";
 
-                // --- ПАМЯТЬ ---
-                List<string> memories = new List<string>();
+                // Мы передаем картинку СПЕЦИАЛЬНЫМ КОДОМ в поле screenContext
+                // GeminiService увидит префикс BASE64: и сделает магию
+                string visionPayload = "";
+                if (!string.IsNullOrEmpty(screenBase64))
+                    visionPayload = "BASE64:" + screenBase64;
+                else
+                    visionPayload = textContext; // Fallback если скрина нет
+
+                // --- SMART MEMORY v2 ---
+                string memoryBlock = "";
                 if (_memory != null)
                 {
-                    // Сохраняем текущий момент в долгосрочную память
-                    await _memory.Save(ocr, app);
-                    memories = await _memory.GetRecent(_appStartTime);
+                    // 1. Сохраняем текущий контекст (лёгкий - без OCR)
+                    await _memory.Save($"User asked: {userVoice} | App: {app}", app);
+                    
+                    // 2. Получаем УМНЫЙ КОНТЕКСТ (Session + Relevant + Recent)
+                    memoryBlock = await _memory.GetSmartContext(userVoice, _appStartTime);
                 }
-                string memoryBlock = string.Join("\n", memories);
 
                 // --- ПОДГОТОВКА ИСТОРИИ ---
                 // Берем сообщения из UI (ObservableCollection)
                 // Исключаем последнее (которое мы только что добавили - userVoice), 
                 // так как метод ChatWithHistory сам добавит его с контекстом.
                 var chatHistory = Messages.Where(m => !string.IsNullOrEmpty(m.Text)).ToList();
-                // Удаляем последнее сообщение пользователя из списка "истории", 
-                // потому что мы передадим его отдельно как "активный запрос" с прикрепленным контекстом.
                 if (chatHistory.Count > 0 && chatHistory.Last().IsUser && chatHistory.Last().Text == userVoice)
                 {
                     chatHistory.RemoveAt(chatHistory.Count - 1);
                 }
 
                 // --- ЗАПРОС К МОЗГУ ---
-                // ВАЖНО: Мы используем обновленный GeminiService
-                // Если у тебя _neuralLink или _omniLoop - адаптируй вызов там, или вызывай сервис напрямую
-                // Предположим, мы вызываем сервис напрямую для наглядности:
+                if (_gemini == null) _gemini = new GeminiService(API_KEY);
 
-                var gemini = new GeminiService("AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs");
+                // Формируем richContext (Приложение + Процессы + UI)
+                string richContext = $"{app}\n[PROCESSES]: {processes}\n[UI]: {ui.Substring(0, Math.Min(ui.Length, 800))}";
 
-                string answer = await gemini.ChatWithHistory(
-                    chatHistory,    // Вся история чата
-                    userVoice,      // Текущий вопрос
-                    fullScreenContext, // Сырые данные экрана (обновленные!)
-                    app,            // Имя окна
-                    memoryBlock     // Долгосрочная память
+                string answerFinal = await _gemini.ChatWithHistory(
+                    chatHistory, 
+                    userVoice, 
+                    visionPayload, 
+                    richContext, 
+                    memoryBlock
                 );
 
-                // --- ОБРАБОТКА ОТВЕТА ---
-                ExecuteCommands(answer);
+                // --- CRITIC LOOP: Check if AI described action but didn't execute ---
+                string executionResult = "";
+                
+                // Normalize commands: add brackets if missing
+                // Detect patterns like "KEYS:WIN" and convert to "[[KEYS:WIN]]"
+                var commandPatterns = new[] { 
+                    "KEYS:", "WINDOW:", "OPEN_APP:", "TYPE:", "CLICK:", "RUN_SHELL:", "RUN_PYTHON:", "WRITE_FILE:", "SCROLL:", "CLIPBOARD:", "LOG:",
+                    "Typing:", "Launching:", "Opening:", "Clicking:", "Writing:", "Keys:" 
+                };
+                string normalized = answerFinal;
+                
+                foreach (var pattern in commandPatterns)
+                {
+                    // Find pattern NOT already in brackets
+                    int idx = 0;
+                    while ((idx = normalized.IndexOf(pattern, idx)) >= 0)
+                    {
+                        // Check if already has [[
+                        if (idx >= 2 && normalized.Substring(idx - 2, 2) == "[[")
+                        {
+                            idx += pattern.Length;
+                            continue;
+                        }
+                        
+                        // SAFETY: Check if at start of line OR preceded by a list marker (e.g. "1. ", "- ", "> ")
+                        bool isStartOfLine = idx == 0 || normalized[idx - 1] == '\n' || normalized[idx - 1] == '\r';
+                        if (!isStartOfLine)
+                        {
+                            // Walk back over whitespace
+                            int walkBack = idx - 1;
+                            while (walkBack >= 0 && char.IsWhiteSpace(normalized[walkBack]) && normalized[walkBack] != '\n' && normalized[walkBack] != '\r')
+                                walkBack--;
+                            
+                            if (walkBack < 0 || normalized[walkBack] == '\n' || normalized[walkBack] == '\r')
+                                isStartOfLine = true;
+                            else 
+                            {
+                                // Check for common list prefixes: ".", "-", "*", ">", ":"
+                                char c = normalized[walkBack];
+                                if (c == '.' || c == '-' || c == '*' || c == '>' || c == ':')
+                                {
+                                    // Walk back over digits if it was a dot
+                                    if (c == '.')
+                                    {
+                                        walkBack--;
+                                        while (walkBack >= 0 && char.IsDigit(normalized[walkBack])) walkBack--;
+                                    }
+                                    else
+                                        walkBack--;
 
-                string cleanAnswer = answer
+                                    // Check if we are NOW at start of line (after skipping the marker)
+                                    while (walkBack >= 0 && char.IsWhiteSpace(normalized[walkBack]) && normalized[walkBack] != '\n' && normalized[walkBack] != '\r')
+                                        walkBack--;
+                                        
+                                    if (walkBack < 0 || normalized[walkBack] == '\n' || normalized[walkBack] == '\r')
+                                        isStartOfLine = true;
+                                }
+                            }
+                        }
+                        
+                        // If not start of line, skip it (it's likely explanation text)
+                        if (!isStartOfLine)
+                        {
+                            idx += pattern.Length;
+                            continue;
+                        }
+                        
+                        // Find end of argument (newline, space after arg, or end)
+                        int argStart = idx + pattern.Length;
+                        int argEnd = normalized.IndexOfAny(new[] { '\n', '\r' }, argStart);
+                        if (argEnd < 0) argEnd = normalized.Length;
+                        
+                        // Also check for ]] if partially bracketed
+                        int bracketEnd = normalized.IndexOf("]]", argStart);
+                        if (bracketEnd > 0 && bracketEnd < argEnd) argEnd = bracketEnd;
+                        
+                        string arg = normalized.Substring(argStart, argEnd - argStart).Trim();
+                        string cmdName = pattern.TrimEnd(':');
+                        
+                        // Replace with bracketed version
+                        string oldCmd = normalized.Substring(idx, argEnd - idx);
+                        string newCmd = $"[[{cmdName}:{arg}]]";
+                        normalized = normalized.Remove(idx, oldCmd.Length).Insert(idx, newCmd);
+                        
+                        idx += newCmd.Length;
+                    }
+                }
+                
+                answerFinal = normalized;
+                bool hasCommand = answerFinal.Contains("[[") && answerFinal.Contains("]]");
+                
+                System.Diagnostics.Debug.WriteLine($"[FLUX] Has command: {hasCommand}");
+                
+                if (hasCommand)
+                {
+                    System.Diagnostics.Debug.WriteLine("[FLUX] Starting iterative execution...");
+                    
+                    // ITERATIVE LOOP: Execute → Screenshot → Continue
+                    string currentResponse = answerFinal;
+                    int maxIterations = 5; // Safety limit
+                    var allResults = new List<string>();
+                    
+                    for (int i = 0; i < maxIterations; i++)
+                    {
+                        // Execute current commands (Skip permission if i > 0, as we approved the task already)
+                        string stepResult = await ExecuteWithPermissionAsync(currentResponse, i > 0);
+                        allResults.Add(stepResult);
+                        System.Diagnostics.Debug.WriteLine($"[FLUX] Step {i+1} result: {stepResult}");
+                        
+                        // Take new screenshot to see what happened
+                        await Task.Delay(500); // Brief wait for UI
+                        string newScreenshot = _cortex?.GetScreenBase64() ?? "";
+                        
+                        if (string.IsNullOrEmpty(newScreenshot) || _gemini == null)
+                            break;
+                        
+                        // Ask AI: What now? Is task complete?
+                        string continuePrompt = $@"STEP COMPLETED. Result: {stepResult}
+
+Original task: '{userVoice}'
+What you see now: [NEW SCREENSHOT ATTACHED]
+
+If task is DONE, reply: DONE
+If more steps needed, output next [[COMMAND:...]]
+Look at screen and continue.";
+
+                        var continueHistory = new List<ChatMessage>
+                        {
+                            new ChatMessage { Text = continuePrompt, IsUser = true }
+                        };
+                        
+                        string nextResponse = await _gemini.ChatWithHistory(
+                            continueHistory, "", "BASE64:" + newScreenshot, "", ""
+                        );
+                        
+                        System.Diagnostics.Debug.WriteLine($"[FLUX] AI response: {nextResponse.Substring(0, Math.Min(100, nextResponse.Length))}");
+                        
+                        // Check if done
+                        if (nextResponse.ToUpper().Contains("DONE") || 
+                            (!nextResponse.Contains("[[") && !nextResponse.Contains("KEYS:") && !nextResponse.Contains("TYPE:")))
+                        {
+                            System.Diagnostics.Debug.WriteLine("[FLUX] Task complete!");
+                            break;
+                        }
+                        
+                        // Normalize and continue
+                        currentResponse = nextResponse;
+                        // Normalize and continue
+                        currentResponse = nextResponse;
+                        var loopPatterns = new[] { 
+                            "KEYS:", "WINDOW:", "OPEN_APP:", "TYPE:", "CLICK:", "RUN_SHELL:", "WRITE_FILE:", "LOG:",
+                            "Typing:", "Launching:", "Opening:", "Clicking:", "Writing:", "Keys:"
+                        };
+                        foreach (var pattern in loopPatterns)
+                        {
+                            int idx = currentResponse.IndexOf(pattern);
+                            if (idx >= 0 && (idx < 2 || currentResponse.Substring(idx - 2, 2) != "[["))
+                            {
+                                int argEnd = currentResponse.IndexOfAny(new[] { '\n', '\r' }, idx + pattern.Length);
+                                if (argEnd < 0) argEnd = currentResponse.Length;
+                                string arg = currentResponse.Substring(idx + pattern.Length, argEnd - idx - pattern.Length).Trim();
+                                string cmdName = pattern.TrimEnd(':');
+                                currentResponse = currentResponse.Remove(idx, argEnd - idx).Insert(idx, $"[[{cmdName}:{arg}]]");
+                            }
+                        }
+                    }
+                    
+                    executionResult = string.Join("\n", allResults);
+                }
+                
+                // Fallback: старые команды без разрешений (для совместимости)
+                ExecuteCommands(answerFinal);
+
+                string cleanAnswer = answerFinal
                     .Replace("[[OPEN:", "Launching: ")
                     .Replace("[[SEARCH:", "Searching: ")
+                    .Replace("[[READ_FILE:", "Reading: ")
+                    .Replace("[[OPEN_URL:", "Opening: ")
+                    .Replace("[[OPEN_APP:", "Launching: ")
+                    .Replace("[[CLICK:", "Clicking: ")
+                    .Replace("[[TYPE:", "Typing: ")
+                    .Replace("[[KEYS:", "Keys: ")
+                    .Replace("[[WRITE_FILE:", "Writing: ")
+                    .Replace("[[RUN_PYTHON:", "Python: ")
+                    .Replace("[[RUN_SHELL:", "Shell: ")
+                    .Replace("[[RUN_NODE:", "Node.js: ")
+                    .Replace("[[CLIPBOARD:", "Clipboard: ")
+                    .Replace("[[DOWNLOAD_FILE:", "Downloading: ")
+                    .Replace("[[SCROLL:", "Scrolling: ")
+                    .Replace("[[WINDOW:", "Window: ")
                     .Replace("]]", "");
+                
+                // Добавляем результат выполнения если есть
+                if (!string.IsNullOrEmpty(executionResult))
+                    cleanAnswer += "\n\n---\n[EXECUTION RESULT]:\n" + executionResult;
 
                 // Вывод ответа (он автоматически попадет в Messages и сохранится при выходе)
                 await Dispatcher.Invoke(async () => await StreamMessage(cleanAnswer));
@@ -497,6 +863,60 @@ namespace FluxCore
             }
         }
         private void InputBox_KeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) Btn_Send_Click(sender, e); }
+
+        // =========================================
+        // TAB NAVIGATION
+        // =========================================
+        private void Tab_Chat_Click(object sender, RoutedEventArgs e)
+        {
+            ChatList.Visibility = Visibility.Visible;
+            MemoryPanel.Visibility = Visibility.Collapsed;
+            StatsPanel.Visibility = Visibility.Collapsed;
+            UpdateTabColors("chat");
+        }
+
+        private async void Tab_Memory_Click(object sender, RoutedEventArgs e)
+        {
+            ChatList.Visibility = Visibility.Collapsed;
+            MemoryPanel.Visibility = Visibility.Visible;
+            StatsPanel.Visibility = Visibility.Collapsed;
+            UpdateTabColors("memory");
+            
+            // Load memories
+            if (_memory != null)
+            {
+                var memories = await _memory.GetRecentMemoriesAsync(50);
+                MemoryList.ItemsSource = memories;
+            }
+        }
+
+        private async void Tab_Stats_Click(object sender, RoutedEventArgs e)
+        {
+            ChatList.Visibility = Visibility.Collapsed;
+            MemoryPanel.Visibility = Visibility.Collapsed;
+            StatsPanel.Visibility = Visibility.Visible;
+            UpdateTabColors("stats");
+            
+            // Update stats
+            var duration = DateTime.Now - _appStartTime;
+            StatsDuration.Text = $"{(int)duration.TotalHours}h {duration.Minutes}m";
+            StatsMessages.Text = Messages.Count.ToString();
+            
+            if (_memory != null)
+            {
+                var stats = await _memory.GetSessionStatsAsync(_appStartTime);
+                StatsMemories.Text = stats.TotalMemories.ToString();
+                StatsTopApps.Text = string.Join(", ", stats.TopApps);
+                StatsSessionSummary.Text = stats.SessionSummary;
+            }
+        }
+
+        private void UpdateTabColors(string activeTab)
+        {
+            TabChat.Foreground = activeTab == "chat" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
+            TabMemory.Foreground = activeTab == "memory" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
+            TabStats.Foreground = activeTab == "stats" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
+        }
         private void NameBox_TextChanged(object sender, TextChangedEventArgs e) { _panelName = NameBox.Text; TitleText.Text = _panelName.ToUpper(); }
 
         private void WakeWord_Changed(object sender, RoutedEventArgs e) { _requireWakeWord = WakeWordCheck.IsChecked == true; }
@@ -555,36 +975,39 @@ namespace FluxCore
                 scroller?.ScrollToBottom();
             }
 
+            // АДАПТИВНАЯ СКОРОСТЬ
+            // Если текст длинный (логи), печатаем огромными кусками
+            int totalLen = fullText.Length;
+            int batchSize = totalLen > 1000 ? 100 : (totalLen > 200 ? 10 : 3);
+            int delay = totalLen > 1000 ? 1 : 10;
+
             StringBuilder sb = new StringBuilder();
-            char[] chars = fullText.ToCharArray();
-
-            // УСКОРЕНИЕ: Проходим циклом
-            for (int i = 0; i < chars.Length; i++)
+            
+            for (int i = 0; i < totalLen; i += batchSize)
             {
-                sb.Append(chars[i]);
+                int len = Math.Min(batchSize, totalLen - i);
+                sb.Append(fullText.Substring(i, len));
+                botMsg.Text = sb.ToString();
 
-                // ОБНОВЛЕНИЕ UI:
-                // Чтобы не тормозило, обновляем UI не на каждой букве, а каждые 3-5 букв
-                // Или если это последняя буква
-                if (i % 3 == 0 || i == chars.Length - 1)
+                // Скролл реже
+                if (i % (batchSize * 5) == 0 && VisualTreeHelper.GetChildrenCount(ChatList) > 0)
                 {
-                    botMsg.Text = sb.ToString();
-
-                    // Автоскролл (чуть реже, чтобы не дергалось)
-                    if (i % 10 == 0 && VisualTreeHelper.GetChildrenCount(ChatList) > 0)
-                    {
-                        var border = VisualTreeHelper.GetChild(ChatList, 0) as Border;
-                        var scroller = VisualTreeHelper.GetChild(border, 0) as ScrollViewer;
-                        scroller?.ScrollToBottom();
-                    }
-
-                    // МИНИМАЛЬНАЯ ЗАДЕРЖКА (1 мс)
-                    // Это создает эффект "Хакерского потока"
-                    await Task.Delay(1);
+                    var border = VisualTreeHelper.GetChild(ChatList, 0) as Border;
+                    var scroller = VisualTreeHelper.GetChild(border, 0) as ScrollViewer;
+                    scroller?.ScrollToBottom();
                 }
+
+                await Task.Delay(delay);
             }
-            // Финальный скролл
-            botMsg.Text = sb.ToString();
+            
+            // Финальная синхронизация
+            botMsg.Text = fullText;
+            if (VisualTreeHelper.GetChildrenCount(ChatList) > 0)
+            {
+                var border = VisualTreeHelper.GetChild(ChatList, 0) as Border;
+                var scroller = VisualTreeHelper.GetChild(border, 0) as ScrollViewer;
+                scroller?.ScrollToBottom();
+            }
         }
 
 
@@ -614,9 +1037,429 @@ namespace FluxCore
         private void ToggleAllPanels() { bool show = (this.Visibility != Visibility.Visible || this.Opacity < 0.1); foreach (Window w in Application.Current.Windows) { if (w is MainWindow mw) { if (show) { mw.Opacity = 0; mw.Visibility = Visibility.Visible; mw.FadeIn(); } else mw.FadeOut(); } } if (show) { this.Activate(); InputBox.Focus(); } }
         public void FadeIn() { BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200))); }
         public void FadeOut() { var a = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200)); a.Completed += (s, e) => Visibility = Visibility.Hidden; BeginAnimation(OpacityProperty, a); }
+        public void ForceHide() { Dispatcher.Invoke(() => FadeOut()); }
 
         private void LoadConfig() { try { if (File.Exists("config.json")) { var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText("config.json")); if (cfg != null) { SliderR.Value = cfg.R; SliderG.Value = cfg.G; SliderB.Value = cfg.B; SliderAlpha.Value = cfg.Alpha; _panelName = cfg.Name ?? "Flux ai"; NameBox.Text = _panelName; TitleText.Text = _panelName.ToUpper(); _requireWakeWord = cfg.RequireWakeWord; WakeWordCheck.IsChecked = _requireWakeWord; } } } catch { } }
         private void SaveConfig() { if (!_isSecondary) try { File.WriteAllText("config.json", JsonSerializer.Serialize(new AppConfig { R = SliderR.Value, G = SliderG.Value, B = SliderB.Value, Alpha = SliderAlpha.Value, Name = _panelName, RequireWakeWord = _requireWakeWord })); } catch { } }
-        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); }
+        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); _ = _executor?.DisposeAsync(); }
+
+        // =========================================
+        // PERMISSION DIALOG SYSTEM
+        // =========================================
+        
+        private void Btn_PermissionAllow_Click(object sender, RoutedEventArgs e)
+        {
+            PermissionOverlay.Visibility = Visibility.Collapsed;
+            _permissionResult?.TrySetResult(true);
+        }
+
+        private void Btn_PermissionDeny_Click(object sender, RoutedEventArgs e)
+        {
+            PermissionOverlay.Visibility = Visibility.Collapsed;
+            _permissionResult?.TrySetResult(false);
+        }
+
+        /// <summary>
+        /// Shows permission dialog and waits for user response.
+        /// </summary>
+        private string _expectedTarget = ""; // Track what app we expect to be focused
+
+        private async Task<bool> RequestPermissionAsync(string actionType, string target)
+        {
+            _pendingAction = actionType;
+            _pendingTarget = target;
+            _permissionResult = new TaskCompletionSource<bool>();
+
+            Dispatcher.Invoke(() =>
+            {
+                PermissionActionText.Text = $"Flux wants to {actionType}:";
+                PermissionDetailsText.Text = target;
+                PermissionOverlay.Visibility = Visibility.Visible;
+            });
+
+            return await _permissionResult.Task;
+        }
+
+        /// <summary>
+        /// Executes actions with permission. Handles MULTIPLE commands in sequence.
+        /// </summary>
+        private async Task<string> ExecuteWithPermissionAsync(string fullResponse, bool skipPermission = false)
+        {
+            if (_executor == null) _executor = new ExecutionAgent();
+            if (_automation == null) _automation = new WindowsAutomationAgent();
+            
+            var results = new List<string>();
+            
+            // Extract all commands from response
+            var commands = ExtractAllCommands(fullResponse);
+            
+            if (commands.Count == 0)
+                return "";
+            
+            // Ask permission once for all commands (UNLESS skipped)
+            if (!skipPermission)
+            {
+                string summary = string.Join(", ", commands.Take(5).Select(c => $"{c.Type}:{c.Arg}"));
+                if (commands.Count > 5) summary += $" (+{commands.Count - 5} more)";
+                
+                if (!await RequestPermissionAsync($"execute {commands.Count} action(s)", summary))
+                    return "[Permission denied]";
+            }
+            
+            // Execute each command in sequence
+            // Execute each command in sequence
+            foreach (var originalCmd in commands)
+            {
+                // Map aliases to standard types
+                var cmd = originalCmd;
+                if (cmd.Type == "Typing") cmd = ("TYPE", cmd.Arg);
+                if (cmd.Type == "Launching" || cmd.Type == "Opening") cmd = ("OPEN_APP", cmd.Arg);
+                if (cmd.Type == "Clicking") cmd = ("CLICK", cmd.Arg);
+                if (cmd.Type == "Writing") cmd = ("WRITE_FILE", cmd.Arg);
+                if (cmd.Type == "Keys") cmd = ("KEYS", cmd.Arg);
+
+                try
+                {
+                    string result = "";
+                    
+                    switch (cmd.Type)
+                    {
+                        case "OPEN_APP":
+                            // Capture current window
+                            string oldTitle = _cortex?.GetActiveWindow() ?? "";
+                            
+                            var appResult = await _executor.OpenApp(cmd.Arg);
+                            result = appResult.Success ? appResult.Message : $"Error: {appResult.Message}";
+                            
+                            // Track what we expect to be focused
+                            if (appResult.Success)
+                            {
+                                 _expectedTarget = cmd.Arg.ToLower();
+                                 if (_expectedTarget.Contains("chrome")) _expectedTarget = "chrome";
+                                 if (_expectedTarget.Contains("telegram")) _expectedTarget = "telegram";
+                                 if (_expectedTarget.Contains("instagram")) _expectedTarget = "instagram"; ///chrome usually
+                            }
+                            
+                            // Smart Wait: Poll until active window changes (max 8s)
+                            // Optimization: If we just focused an existing app, the title might NOT change.
+                            // So we check if the result message says "Focused existing".
+                            bool justFocused = appResult.Message.Contains("Focused existing");
+                            
+                            if (appResult.Success)
+                            {
+                                int waited = 0;
+                                int maxWait = justFocused ? 2000 : 8000; // Wait less if just focusing
+                                
+                                while (waited < maxWait)
+                                {
+                                    await Task.Delay(500);
+                                    waited += 500;
+                                    string newTitle = _cortex?.GetActiveWindow() ?? "";
+                                    
+                                    // If title changed OR we are just focusing and the title ALREADY contains the target
+                                    if (newTitle != oldTitle && !string.IsNullOrEmpty(newTitle) && !newTitle.Contains("Flux"))
+                                    {
+                                        System.Diagnostics.Debug.WriteLine($"[FLUX] Window switched to: {newTitle}");
+                                        break;
+                                    }
+                                    
+                                    // If we focused existing, and the CURRENT title is already correct, stop waiting
+                                    if (justFocused && !string.IsNullOrEmpty(newTitle) && newTitle.ToLower().Contains(_expectedTarget))
+                                    {
+                                         break;
+                                    }
+                                }
+                            }
+
+                            else
+                            {
+                                await Task.Delay(1000); // Wait a bit on error
+                            }
+
+                            // Reset automation target to find the new window
+                            _automation = new WindowsAutomationAgent();
+                            break;
+
+                        case "LOG":
+                            Dispatcher.Invoke(() => AddMessage($"[🧠] {cmd.Arg}", false));
+                            result = "Logged thought.";
+                            break;
+                            
+                        case "READ_FILE":
+                            var readResult = await _executor.ReadFileAsync(cmd.Arg);
+                            result = readResult.Success ? readResult.Message : $"Error: {readResult.Message}";
+                            break;
+                            
+                        case "OPEN_URL":
+                            var urlResult = await _executor.OpenUrlAsync(cmd.Arg);
+                            result = urlResult.Success ? urlResult.Message : $"Error: {urlResult.Message}";
+                            break;
+                            
+                        case "CLICK":
+                            // STRICT SAFETY CHECK
+                            if (!string.IsNullOrEmpty(_expectedTarget))
+                            {
+                                string current = _cortex?.GetActiveWindow()?.ToLower() ?? "";
+                                string proc = _cortex?.GetActiveProcessName()?.ToLower() ?? "";
+
+                                bool isMatch = current.Contains(_expectedTarget) || 
+                                               proc.Contains(_expectedTarget) ||
+                                               (_expectedTarget == "chrome" && (proc == "chrome" || current.Contains("google") || current.Contains("new tab") || current.Contains("start page") || current.Contains("search"))) ||
+                                               (_expectedTarget == "instagram" && (proc == "chrome" || current.Contains("chrome")));
+                                
+                                if (!isMatch && !string.IsNullOrEmpty(current) && !current.Contains("flux"))
+                                {
+                                    result = $"[SAFETY STOP] Wrong Window! Expected: '{_expectedTarget}'. Actual: '{current}'.";
+                                    Dispatcher.Invoke(() => AddMessage(result, false)); // Force log immediately
+                                    results.Add(result); // Add to final result
+                                    goto StopExecution; 
+                                }
+                            }
+                            var clickResult = await _automation.ClickElementAsync(cmd.Arg);
+                            result = clickResult.Success ? clickResult.Message : $"Error: {clickResult.Message}";
+                            break;
+                            
+                        case "TYPE":
+                            // STRICT SAFETY CHECK
+                            if (!string.IsNullOrEmpty(_expectedTarget))
+                            {
+                                string current = _cortex?.GetActiveWindow()?.ToLower() ?? "";
+                                string proc = _cortex?.GetActiveProcessName()?.ToLower() ?? "";
+
+                                bool isMatch = current.Contains(_expectedTarget) || 
+                                               proc.Contains(_expectedTarget) ||
+                                               (_expectedTarget == "chrome" && (proc == "chrome" || current.Contains("google") || current.Contains("new tab") || current.Contains("start page") || current.Contains("search"))) ||
+                                               (_expectedTarget == "instagram" && (proc == "chrome" || current.Contains("chrome")));
+                                
+                                if (!isMatch && !string.IsNullOrEmpty(current) && !current.Contains("flux"))
+                                {
+                                    result = $"[SAFETY STOP] Wrong Window! Expected: '{_expectedTarget}'. Actual: '{current}'.";
+                                    Dispatcher.Invoke(() => AddMessage(result, false)); // Force log immediately
+                                    results.Add(result); // Add to final result
+                                    // Stop executing subsequent commands
+                                    goto StopExecution; 
+                                }
+                            }
+
+                            var typeResult = await _automation.TypeTextAsync("", cmd.Arg);
+                            result = typeResult.Success ? typeResult.Message : $"Error: {typeResult.Message}";
+                            await Task.Delay(300); // Wait for UI to process typed text
+                            break;
+                            
+                        case "KEYS":
+                            var keysResult = await _automation.SendKeysAsync(cmd.Arg);
+                            result = keysResult.Success ? keysResult.Message : $"Error: {keysResult.Message}";
+                            
+                            // Smart delays based on what key was pressed
+                            if (cmd.Arg.ToUpper().Contains("WIN"))
+                            {
+                                await Task.Delay(800); // Wait for Start Menu
+                            }
+                            else if (cmd.Arg.ToUpper() == "ENTER")
+                            {
+                                // ENTER after typing = app launch - wait for it to open!
+                                await Task.Delay(2000); // Wait 2 seconds for app to fully open
+                                _automation = new WindowsAutomationAgent(); // Reset to target new window
+                            }
+                            else
+                            {
+                                await Task.Delay(200);
+                            }
+                            break;
+                            
+                        // === CODE EXECUTION COMMANDS ===
+                        case "WRITE_FILE":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            // Format: [[WRITE_FILE:path|content]]
+                            var writeParts = cmd.Arg.Split(new[] { '|' }, 2);
+                            if (writeParts.Length < 2)
+                            {
+                                result = "Error: WRITE_FILE format is [[WRITE_FILE:path|content]]";
+                            }
+                            else
+                            {
+                                var writeResult = await _codeRunner.WriteFileAsync(writeParts[0].Trim(), writeParts[1]);
+                                result = writeResult.Success ? writeResult.Message : $"Error: {writeResult.Message}";
+                            }
+                            break;
+                            
+                        case "RUN_PYTHON":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            var pyResult = await _codeRunner.RunPythonAsync(cmd.Arg);
+                            result = pyResult.Success ? $"Python output:\n{pyResult.Message}" : $"Error: {pyResult.Message}";
+                            break;
+                            
+                        case "RUN_SHELL":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            var shellResult = await _codeRunner.RunPowerShellAsync(cmd.Arg);
+                            result = shellResult.Success ? $"Shell output:\n{shellResult.Message}" : $"Error: {shellResult.Message}";
+                            break;
+                            
+                        case "RUN_NODE":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            var nodeResult = await _codeRunner.RunNodeAsync(cmd.Arg);
+                            result = nodeResult.Success ? $"Node.js output:\n{nodeResult.Message}" : $"Error: {nodeResult.Message}";
+                            break;
+                            
+                        case "CLIPBOARD":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            var clipResult = _codeRunner.SetClipboard(cmd.Arg);
+                            result = clipResult.Success ? clipResult.Message : $"Error: {clipResult.Message}";
+                            break;
+                            
+                        case "DOWNLOAD_FILE":
+                            if (_codeRunner == null) _codeRunner = new CodeExecutionAgent();
+                            var dlParts = cmd.Arg.Split(new[] { '|' }, 2);
+                            if (dlParts.Length < 2)
+                                result = "Error: Format is [[DOWNLOAD_FILE:url|path]]";
+                            else
+                            {
+                                var dlResult = await _codeRunner.DownloadFileAsync(dlParts[0].Trim(), dlParts[1].Trim());
+                                result = dlResult.Success ? dlResult.Message : $"Error: {dlResult.Message}";
+                            }
+                            break;
+                            
+                        case "SCROLL":
+                            var scrollResult = await _automation.ScrollAsync(cmd.Arg);
+                            result = scrollResult.Success ? scrollResult.Message : $"Error: {scrollResult.Message}";
+                            break;
+                            
+                        case "WINDOW":
+                            var winResult = await _automation.WindowControlAsync(cmd.Arg);
+                            result = winResult.Success ? winResult.Message : $"Error: {winResult.Message}";
+                            break;
+                    }
+                    
+                    // === VALIDATOR: Check if action was successful ===
+                    if (!string.IsNullOrEmpty(result))
+                    {
+                        if (_validator == null && _gemini != null) 
+                            _validator = new ValidatorAgent(_gemini);
+                        
+                        if (_validator != null)
+                        {
+                            var validation = await _validator.ValidateAsync(cmd.Arg, cmd.Type, result);
+                            
+                            if (!validation.Success)
+                            {
+                                result += $" [VALIDATOR: {validation.Message}]";
+                                
+                                // If should retry and we haven't retried yet, mark for attention
+                                if (validation.ShouldRetry)
+                                {
+                                    result += " [RETRY RECOMMENDED]";
+                                }
+                            }
+                            else
+                            {
+                                result += $" ✓";
+                            }
+                        }
+                        
+                        results.Add(result);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    results.Add($"Error in {cmd.Type}: {ex.Message}");
+                }
+            }
+            
+            StopExecution:
+            return string.Join("\n", results);
+        }
+        
+        /// <summary>
+        /// Extracts all [[COMMAND:arg]] from text in order of appearance.
+        /// </summary>
+        private List<(string Type, string Arg)> ExtractAllCommands(string text)
+        {
+            var commands = new List<(int Position, string Type, string Arg)>();
+            var commandTypes = new[] { 
+                "OPEN_APP", "READ_FILE", "OPEN_URL", "CLICK", "TYPE", "KEYS", 
+                "WRITE_FILE", "RUN_PYTHON", "RUN_SHELL", "RUN_NODE",
+                "CLIPBOARD", "DOWNLOAD_FILE", "SCROLL", "WINDOW", "LOG",
+                "Typing", "Launching", "Opening", "Clicking", "Writing", "Keys"
+            };
+            
+            // Multiline commands that can contain newlines
+            var multilineCommands = new HashSet<string> { "WRITE_FILE", "RUN_PYTHON", "RUN_SHELL", "RUN_NODE" };
+            
+            // Find ALL commands with their positions
+            foreach (var cmdType in commandTypes)
+            {
+                string pattern = $"[[{cmdType}:";
+                int searchStart = 0;
+                
+                while (true)
+                {
+                    int start = text.IndexOf(pattern, searchStart);
+                    if (start < 0) break;
+                    
+                    int argStart = start + pattern.Length;
+                    int end = text.IndexOf("]]", argStart);
+                    
+                    string arg;
+                    if (end > argStart)
+                    {
+                        arg = text.Substring(argStart, end - argStart);
+                        searchStart = end + 2;
+                    }
+                    else
+                    {
+                        // No closing ]] - for multiline, take until next [[ or end
+                        // For single-line, take until newline
+                        if (multilineCommands.Contains(cmdType))
+                        {
+                            // Find next command or end
+                            int nextCmd = -1;
+                            foreach (var type in commandTypes)
+                            {
+                                int pos = text.IndexOf($"[[{type}:", argStart);
+                                if (pos > argStart && (nextCmd < 0 || pos < nextCmd))
+                                    nextCmd = pos;
+                            }
+                            
+                            if (nextCmd > argStart)
+                                arg = text.Substring(argStart, nextCmd - argStart).TrimEnd();
+                            else
+                                arg = text.Substring(argStart).TrimEnd();
+                        }
+                        else
+                        {
+                            int newline = text.IndexOf('\n', argStart);
+                            arg = newline > argStart ? text.Substring(argStart, newline - argStart) : text.Substring(argStart);
+                        }
+                        searchStart = argStart + arg.Length;
+                    }
+                    
+                    // Store position for sorting
+                    commands.Add((start, cmdType, arg.Trim()));
+                }
+            }
+            
+            // Sort by position in original text
+            return commands.OrderBy(c => c.Position).Select(c => (c.Type, c.Arg)).ToList();
+        }
+
+        private string ExtractCommandArg(string text, string commandName)
+        {
+            string pattern = $"[[{commandName}:";
+            int start = text.IndexOf(pattern);
+            if (start < 0) return "";
+            start += pattern.Length;
+            
+            // Try to find closing ]]
+            int end = text.IndexOf("]]", start);
+            
+            // If no closing brackets, take until newline or end of string
+            if (end < 0)
+            {
+                int newline = text.IndexOf('\n', start);
+                end = newline > 0 ? newline : text.Length;
+            }
+            
+            return text.Substring(start, end - start).Trim();
+        }
     }
 }

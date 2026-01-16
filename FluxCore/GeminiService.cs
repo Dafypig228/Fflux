@@ -18,6 +18,13 @@ namespace FluxCore
     public class GeminiPart
     {
         public string text { get; set; }
+        public GeminiInlineData inline_data { get; set; }
+    }
+
+    public class GeminiInlineData
+    {
+        public string mime_type { get; set; }
+        public string data { get; set; }
     }
 
     public class GeminiService
@@ -41,23 +48,21 @@ namespace FluxCore
         public async Task<string> ChatWithHistory(List<ChatMessage> history, string userNewInput, string screenContext, string activeApp, string memories)
         {
             // 1. Формируем "Системный Промпт" (Контекст момента)
+            // 1. Формируем "Системный Промпт" (Контекст момента)
+            // Если screenContext содержит Base64, мы не пихаем его в текст, а пишем заглушку.
+            string visualTextLog = screenContext.StartsWith("BASE64:") ? "[IMAGE ATTACHED]" : screenContext;
+
             var systemInstruction = $@"
-[[SYSTEM OVERRIDE: FLUX OS]]
-ROLE: You are FLUX, an intelligent OS assistant.
-GOAL: Help the user, remember previous messages, and analyze the screen.
+FLUX: Windows AI. Execute with [[COMMAND:arg]]
 
-[[CURRENT CONTEXT]]
-- APP: {activeApp}
-- TIME: {DateTime.Now:HH:mm}
-- MEMORY: {memories}
+[[KEYS:WIN+D]] [[WINDOW:close]] [[OPEN_APP:appname]] [[TYPE:txt]] [[CLICK:text OR x,y]] [[LOG:text]]
 
-[[VISUAL DATA (SCREEN)]]
-{screenContext}
+RULES:
+1. DO NOT use natural language like ""Typing: hello"". ONLY use [[TYPE:hello]].
+2. ALWAYS use [[LOG: explanation]] to tell the user what you are doing.
+3. Messengers: SEARCH first! Don't assume open chat is correct.
 
-INSTRUCTIONS:
-1. Use the conversation history to understand context.
-2. Use 'VISUAL DATA' to see what the user sees.
-3. Be concise and direct.
+{activeApp}|{memories}|{visualTextLog}
 ";
             var contents = new List<GeminiContent>();
 
@@ -79,10 +84,36 @@ INSTRUCTIONS:
             // Мы вшиваем контекст прямо в последнее сообщение пользователя
             string finalUserPrompt = $"{systemInstruction}\n\n[[USER REQUEST]]:\n{userNewInput}";
 
+            // === VISION UPDATE: Если есть картика, добавляем её ===
+            var userParts = new List<GeminiPart> { new GeminiPart { text = finalUserPrompt } };
+
+            if (!string.IsNullOrEmpty(screenContext) && screenContext.StartsWith("BASE64:"))
+            {
+                string base64 = screenContext.Substring(7);
+                userParts.Add(new GeminiPart 
+                { 
+                    inline_data = new GeminiInlineData 
+                    { 
+                        mime_type = "image/jpeg", 
+                        data = base64 
+                    } 
+                });
+            }
+            else
+            {
+                // Если картинки нет, кидаем текстовый контекст по старинке (fallback)
+                // Но мы договорились, что screenContext теперь это картинка.
+                // Если пришел текст, добавим его просто текстом.
+                if (!string.IsNullOrEmpty(screenContext) && !screenContext.StartsWith("BASE64:"))
+                {
+                    userParts.Add(new GeminiPart { text = $"[[SCREEN TEXT LOG]]:\n{screenContext}" });
+                }
+            }
+
             contents.Add(new GeminiContent
             {
                 role = "user",
-                parts = new List<GeminiPart> { new GeminiPart { text = finalUserPrompt } }
+                parts = userParts
             });
 
             return await SendPayload(contents);
@@ -143,6 +174,62 @@ INSTRUCTIONS:
             {
                 return $"Exception: {ex.Message}";
             }
+        }
+        // ==========================================
+        // 4. EMBEDDINGS (ДЛЯ ПАМЯТИ)
+        // ==========================================
+        public async Task<float[]> GetEmbeddingAsync(string text)
+        {
+            var payload = new
+            {
+                model = "models/text-embedding-004",
+                content = new { parts = new[] { new { text = text } } }
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            try
+            {
+                var response = await _httpClient.PostAsync($"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={_apiKey}", content);
+                var responseStr = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode) return new float[0];
+
+                using var doc = JsonDocument.Parse(responseStr);
+                if (doc.RootElement.TryGetProperty("embedding", out var embeddingEl) &&
+                    embeddingEl.TryGetProperty("values", out var valuesEl))
+                {
+                    // Конвертируем JSON array в float[]
+                    var list = new List<float>();
+                    foreach (var v in valuesEl.EnumerateArray())
+                    {
+                        list.Add(v.GetSingle());
+                    }
+                    return list.ToArray();
+                }
+                return new float[0];
+            }
+            catch
+            {
+                return new float[0];
+            }
+        }
+
+        // ==========================================
+        // 5. SIMPLE GENERATION (ДЛЯ СУММАРИЗАЦИИ)
+        // ==========================================
+        public async Task<string> GenerateText(string prompt)
+        {
+            var contents = new List<GeminiContent>
+            {
+                new GeminiContent
+                {
+                    role = "user",
+                    parts = new List<GeminiPart> { new GeminiPart { text = prompt } }
+                }
+            };
+            return await SendPayload(contents);
         }
     }
 }

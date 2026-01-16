@@ -35,12 +35,54 @@ namespace FluxCore
             catch { _ocrEngine = null; }
         }
 
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        private const uint GW_HWNDNEXT = 2;
+
         public string GetActiveWindow()
         {
             IntPtr hwnd = GetForegroundWindow();
-            StringBuilder sb = new StringBuilder(256);
-            GetWindowText(hwnd, sb, 256);
-            return sb.ToString();
+            int myPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+            
+            // Начинаем поиск
+            int maxDepth = 20; // Увеличим глубину
+            while (maxDepth > 0 && hwnd != IntPtr.Zero)
+            {
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                
+                // Если это МЫ - пропускаем сразу
+                if (pid == myPid)
+                {
+                hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+                    continue;
+                }
+
+                StringBuilder sb = new StringBuilder(256);
+                GetWindowText(hwnd, sb, 256);
+                string title = sb.ToString();
+
+                // Check size to filter ghost windows (Chrome background processes often have 0x0 size)
+                GetWindowRect(hwnd, out RECT rect);
+                int width = rect.Right - rect.Left;
+                int height = rect.Bottom - rect.Top;
+
+                // Фильтр системных окон и оверлеев
+                if (IsWindowVisible(hwnd) && width > 10 && height > 10 &&
+                    !string.IsNullOrWhiteSpace(title) && 
+                    title != "Program Manager" && 
+                    title != "Default IME" &&
+                    !title.Contains("NVIDIA GeForce Overlay", StringComparison.OrdinalIgnoreCase))
+                {
+                    return title;
+                }
+
+                hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+                maxDepth--;
+            }
+            
+            return "Desktop";
         }
 
         // --- TRUE VISION (СКРИНШОТ ДЛЯ GEMINI) ---
@@ -128,6 +170,90 @@ namespace FluxCore
         private string GetElementSummary(AutomationElement element)
         {
             try { return $"{element.Current.LocalizedControlType}: '{element.Current.Name}'"; } catch { return "Unknown"; }
+        }
+
+        /// <summary>
+        /// Scans the active window for clickable elements and returns their positions.
+        /// This gives the AI "vision" to know WHERE to click.
+        /// </summary>
+        public string GetClickableElements(int maxElements = 30)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("=== CLICKABLE ELEMENTS (Name → X,Y coordinates) ===");
+                
+                IntPtr hwnd = GetForegroundWindow();
+                if (hwnd == IntPtr.Zero) return "No active window";
+                
+                var rootElement = AutomationElement.FromHandle(hwnd);
+                if (rootElement == null) return "Cannot access window";
+                
+                // Find all clickable elements: buttons, links, edit boxes, etc.
+                var condition = new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image)
+                );
+                
+                var elements = rootElement.FindAll(TreeScope.Descendants, condition);
+                int count = 0;
+                
+                foreach (AutomationElement elem in elements)
+                {
+                    if (count >= maxElements) break;
+                    
+                    try
+                    {
+                        var rect = elem.Current.BoundingRectangle;
+                        
+                        // Skip elements with no size or off-screen
+                        if (rect.IsEmpty || rect.Width <= 0 || rect.Height <= 0) continue;
+                        if (rect.X < 0 || rect.Y < 0) continue;
+                        
+                        // Get center coordinates
+                        int centerX = (int)(rect.X + rect.Width / 2);
+                        int centerY = (int)(rect.Y + rect.Height / 2);
+                        
+                        string name = elem.Current.Name;
+                        string type = elem.Current.LocalizedControlType;
+                        
+                        // Skip empty names for certain types
+                        if (string.IsNullOrWhiteSpace(name) && type != "edit") continue;
+                        
+                        // Format: "Button 'Send' → 1234,567"
+                        string displayName = string.IsNullOrWhiteSpace(name) ? $"({type})" : name;
+                        if (displayName.Length > 40) displayName = displayName.Substring(0, 37) + "...";
+                        
+                        sb.AppendLine($"  [{type}] \"{displayName}\" → {centerX},{centerY}");
+                        count++;
+                    }
+                    catch { /* Skip problematic elements */ }
+                }
+                
+                if (count == 0)
+                {
+                    sb.AppendLine("  (No clickable elements found - may be a web page, use Tab/Enter instead)");
+                }
+                else
+                {
+                    sb.AppendLine($"\nTo click an element, use: [[CLICK:x,y]]");
+                    sb.AppendLine($"Example: [[CLICK:1234,567]]");
+                }
+                
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return $"Element scan error: {ex.Message}";
+            }
         }
 
         // ===== 2. МОЩНЫЙ OCR (С РАСШИРЕННЫМ КОНТЕКСТОМ) =====
@@ -218,5 +344,17 @@ namespace FluxCore
         }
 
         public string GetSystemInfo() => $"Time: {DateTime.Now:HH:mm:ss}, User: {Environment.UserName}";
+        public string GetActiveProcessName()
+        {
+             IntPtr hwnd = GetForegroundWindow();
+             if (hwnd == IntPtr.Zero) return "";
+             
+             GetWindowThreadProcessId(hwnd, out uint pid);
+             try 
+             {
+                 return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; 
+             }
+             catch { return ""; }
+        }
     }
 }
