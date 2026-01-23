@@ -28,6 +28,17 @@ namespace FluxCore
         private FluxLogger _logger = new FluxLogger(); // File Logger
         private const int MAX_RETRIES = 3;
         private const int MAX_STEPS = 30; // Increased for complex tasks
+        private static readonly string DebugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "FluxDebug.txt");
+
+        private void DebugLog(string message)
+        {
+            try
+            {
+                string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+                File.AppendAllText(DebugPath, $"[{timestamp}] {message}\n");
+            }
+            catch { }
+        }
 
         public JarvisCore(
             GeminiService gemini,
@@ -191,6 +202,13 @@ namespace FluxCore
 
                 var commands = ExtractAllCommands(commandText);
                 
+                // DEBUG: Log what commands were extracted
+                DebugLog($"=== STEP {iteration + 1} ===");
+                DebugLog($"AI Response: {aiResponse.Substring(0, Math.Min(200, aiResponse.Length))}...");
+                DebugLog($"Command Text to Parse: {commandText.Substring(0, Math.Min(150, commandText.Length))}...");
+                DebugLog($"Commands Found: {commands.Count}");
+                foreach (var c in commands) DebugLog($"  → {c.Type}:{c.Arg.Substring(0, Math.Min(100, c.Arg.Length))}");
+                
                 // Filter out LOG commands
                 var logCommands = commands.Where(c => c.Type == "LOG").ToList();
                 var actionCommands = commands.Where(c => c.Type != "LOG").ToList();
@@ -280,7 +298,9 @@ namespace FluxCore
                     OnAction?.Invoke(currentAction);
                     
                     _logger.Log($"Executing Action: {currentAction}");
+                    DebugLog($"EXECUTING: {currentAction}");
                     ExecutionOutcome outcome = await ExecuteWithRetryAsync(cmd.Type, cmd.Arg);
+                    DebugLog($"RESULT: Success={outcome.Success}, Message={outcome.Message}");
                     _logger.Log($"Action Completed: {outcome.Success}");
                     _logToUI($"[DEBUG] Command returned. Success: {outcome.Success}");
                     
@@ -521,9 +541,12 @@ namespace FluxCore
                     return new ExecutionResult(winRes.Success, winRes.Message);
                     
                 case "RUN_PYTHON":
+                case "PYTHON":
                     return await _codeRunner.RunPythonAsync(cmdArg);
                     
                 case "RUN_SHELL":
+                case "POWERSHELL":
+                case "PS":
                     return await _codeRunner.RunPowerShellAsync(cmdArg);
                     
                 case "WRITE_FILE":
@@ -580,6 +603,32 @@ namespace FluxCore
                 case "MAKE_DIR":
                     return await _codeRunner.MakeDirAsync(cmdArg);
 
+                // TIER 1: SMART FILE MANAGEMENT
+                case "COPY_FILE":
+                    var copyParts = cmdArg.Split('|');
+                    if (copyParts.Length < 2) return new ExecutionResult(false, "Usage: COPY_FILE:source|dest");
+                    return await _codeRunner.CopyFileAsync(copyParts[0].Trim(), copyParts[1].Trim());
+                
+                case "DELETE_FILE":
+                    return await _codeRunner.DeleteFileAsync(cmdArg);
+                
+                case "RENAME_FILE":
+                    var renameParts = cmdArg.Split('|');
+                    if (renameParts.Length < 2) return new ExecutionResult(false, "Usage: RENAME_FILE:path|newName");
+                    return await _codeRunner.RenameFileAsync(renameParts[0].Trim(), renameParts[1].Trim());
+                
+                case "FILE_INFO":
+                    return await _codeRunner.GetFileInfoAsync(cmdArg);
+                
+                case "READ_FILE":
+                    return await _codeRunner.ReadFileAsync(cmdArg);
+
+                // TIER 2: SMART FILE DISCOVERY
+                case "SEARCH_FILES":
+                case "FIND_FILE":
+                case "FIND":
+                    return await _codeRunner.SearchFilesAsync(cmdArg);
+
                 case "HIDE_SELF":
                 case "MINIMIZE_SELF":
                     // Run on thread pool ensuring we don't block command execution loop
@@ -609,67 +658,74 @@ namespace FluxCore
             }
 
             sb.AppendLine();
-            sb.AppendLine("CRITICAL INSTRUCTIONS:");
-            sb.AppendLine($"USER PROFILE PATH: {Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}");
-            sb.AppendLine("1. BATCH MODE ENABLED: You can output 50+ [[MOVE_FILE]] commands in a single response. DO IT.");
-            sb.AppendLine("2. YOU HAVE FILE PERMISSION: You can and MUST move files programmatically using [[MOVE_FILE]].");
-            sb.AppendLine("3. DO NOT ASK THE USER TO SORT MANUALLY. That is failure.");
-            sb.AppendLine("4. If listing shows files on Desktop, MOVE THEM into the folders you just created.");
+            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("YOU ARE FLUXORIA - AUTONOMOUS AI");
+            sb.AppendLine("You control this Windows PC. You can do ANYTHING.");
+            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine();
+            sb.AppendLine("CORE TOOLS:");
+            sb.AppendLine("  [[POWERSHELL:command]] - Run any PowerShell command");
+            sb.AppendLine("  [[PYTHON:code]] - Execute Python code");
+            sb.AppendLine("  [[CLICK:text]] or [[CLICK:x,y]] - Click on screen");
+            sb.AppendLine("  [[TYPE:text]] - Type text (URLs auto-open in browser)");
+            sb.AppendLine("  [[KEYS:combo]] - Keyboard shortcuts (ENTER, CTRL+C, WIN+D)");
+            sb.AppendLine("  [[OPEN_APP:name]] - Open/focus application");
+            sb.AppendLine("  [[HIDE_SELF]] - Minimize Fluxoria window");
+            sb.AppendLine("  [[WAIT:ms]] - Wait milliseconds");
+            sb.AppendLine();
             
+            // CRITICAL: Tell AI the REAL paths (handles OneDrive!)
+            string realDesktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string realDocuments = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            sb.AppendLine("★★★ CRITICAL: REAL PATHS (NOT default!) ★★★");
+            sb.AppendLine($"  Desktop = {realDesktop}");
+            sb.AppendLine($"  Documents = {realDocuments}");
+            sb.AppendLine("  USE THESE EXACT PATHS - the default C:\\Users\\...\\Desktop may NOT work!");
+            sb.AppendLine();
+            
+            sb.AppendLine("★★★ YOU FIGURE OUT THE REST ★★★");
+            sb.AppendLine("Need to find files? → Write PowerShell: Get-ChildItem -Recurse -Filter '*.pdf'");
+            sb.AppendLine("Need to move files? → Write PowerShell: Move-Item 'src' 'dest'");
+            sb.AppendLine("Need to analyze data? → Write Python code");
+            sb.AppendLine("Need anything else? → Write the code for it!");
+            sb.AppendLine();
+            sb.AppendLine("NEVER say 'I cannot'. You have a full OS at your command.");
+            sb.AppendLine("Errors are feedback. Try a different approach.");
             sb.AppendLine();
             sb.AppendLine($"ACTIVE WINDOW: {activeWindow} | Step: {step + 1}/30");
-            sb.AppendLine();
             
             if (successes.Count > 0)
             {
-                sb.AppendLine("Completed:");
-                foreach (var s in successes.TakeLast(5))
-                    sb.AppendLine($"  {s}");
                 sb.AppendLine();
+                sb.AppendLine("✓ Completed:");
+                foreach (var s in successes.TakeLast(3))
+                    sb.AppendLine($"  {s}");
             }
             
             if (failures.Count > 0)
             {
-                sb.AppendLine("Failed (don't repeat):");
-                foreach (var f in failures.TakeLast(3))
-                    sb.AppendLine($"  {f}");
                 sb.AppendLine();
+                sb.AppendLine("✗ Errors (try different approach):");
+                foreach (var f in failures.TakeLast(2))
+                    sb.AppendLine($"  {f}");
             }
             
             if (!string.IsNullOrEmpty(clickableElements))
             {
                 sb.AppendLine();
                 sb.AppendLine(clickableElements);
-                sb.AppendLine();
             }
             
-            sb.AppendLine("TOOLS:");
-            sb.AppendLine("  [[TYPE:text]] - Type text (URLs open in your browser)");
-            sb.AppendLine("  [[KEYS:combo]] - Keyboard shortcut (ENTER, TAB, CTRL+C)");
-            sb.AppendLine("  [[CLICK:text]] - Click element by name/text (RELIABLE!)");
-            sb.AppendLine("  [[CLICK:x,y]] - Click at screen coordinates");
-            sb.AppendLine("  [[DRAG:x1,y1,x2,y2]] - Drag from A to B");
-            sb.AppendLine("  [[LIST_FILES:path]] - List files in folder");
-            sb.AppendLine("  [[MOVE_FILE:src|dest]] - Move file to folder");
-            sb.AppendLine("  [[MAKE_DIR:path]] - Create folder");
-            sb.AppendLine("  [[HIDE_SELF]] - Minimize Flux window (to access desktop)");
-            sb.AppendLine("  [[OPEN_APP:name]] - Open/focus application");
-            sb.AppendLine("  [[WAIT:ms]] - Wait milliseconds");
-            sb.AppendLine();
-            sb.AppendLine("TIP: Open websites with [[TYPE:url]] (e.g. [[TYPE:instagram.com]]), NOT [[OPEN_APP]].");
-            
-            // Contextual Tip from Memory
             if (memories != null && memories.Any())
             {
-                sb.AppendLine("IMPORTANT LESSON FROM MEMORY: " + memories.First());
+                sb.AppendLine();
+                sb.AppendLine("LESSON FROM MEMORY: " + memories.First());
             }
 
             sb.AppendLine();
-            sb.AppendLine("IMPORTANT: You must THINK before you act.");
-            sb.AppendLine("Format your response exactly like this:");
-            sb.AppendLine("THOUGHT: [Reasoning about the screen state and what to do next]");
-            sb.AppendLine("ACTION: [[COMMAND:arg]]");
-            sb.AppendLine("If the task is finished, your ACTION must be: TASK_COMPLETE");
+            sb.AppendLine("FORMAT: Think first, then act.");
+            sb.AppendLine("THOUGHT: [Your reasoning]");
+            sb.AppendLine("ACTION: [[COMMAND:arg]]  or  TASK_COMPLETE");
             
             return sb.ToString();
         }
@@ -680,7 +736,7 @@ namespace FluxCore
         private List<(string Type, string Arg)> ExtractAllCommands(string text)
         {
             var result = new List<(string Type, string Arg, int Position)>();
-            var commandTypes = new[] { "OPEN_APP", "TYPE", "KEYS", "CLICK", "CLICK_TEXT", "SCROLL", "DRAG", "WINDOW", "WAIT", "LOG", "RUN_PYTHON", "RUN_SHELL", "WRITE_FILE", "LIST_FILES", "MOVE_FILE", "MAKE_DIR", "HIDE_SELF", "MINIMIZE_SELF", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO" };
+            var commandTypes = new[] { "OPEN_APP", "TYPE", "KEYS", "CLICK", "SCROLL", "DRAG", "WINDOW", "WAIT", "LOG", "PYTHON", "POWERSHELL", "PS", "HIDE_SELF", "MINIMIZE_SELF" };
             
             foreach (var cmdType in commandTypes)
             {

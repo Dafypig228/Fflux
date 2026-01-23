@@ -271,9 +271,9 @@ namespace FluxCore
                     
                     SetCursorPos(x, y);
                     await Task.Delay(50);
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); // Changed UIntPtr.Zero to 0
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     await Task.Delay(50);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);   // Changed UIntPtr.Zero to 0
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     
                     return new AutomationResult(true, $"Clicked at {x},{y}");
                 }
@@ -282,7 +282,6 @@ namespace FluxCore
                 if (nameOrId.Contains("Close", StringComparison.OrdinalIgnoreCase) ||
                     nameOrId.Contains("File", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Find Notepad or similar
                     SetTargetWindowByTitle("Notepad");
                 }
 
@@ -290,6 +289,19 @@ namespace FluxCore
                 var target = clickables.FirstOrDefault(e => 
                     e.Name.Contains(nameOrId, StringComparison.OrdinalIgnoreCase) ||
                     e.AutomationId.Contains(nameOrId, StringComparison.OrdinalIgnoreCase));
+
+                // FALLBACK: Search desktop icons if not found in current window
+                if (target == null)
+                {
+                    var desktopElements = FindDesktopIcons();
+                    target = desktopElements.FirstOrDefault(e => 
+                        e.Name.Contains(nameOrId, StringComparison.OrdinalIgnoreCase));
+                    
+                    if (target != null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[Automation] Found on desktop: {target.Name}");
+                    }
+                }
 
                 if (target == null)
                 {
@@ -327,6 +339,53 @@ namespace FluxCore
             {
                 return new AutomationResult(false, $"Click failed: {ex.Message}");
             }
+        }
+        
+        /// <summary>
+        /// Finds desktop icons by accessing Program Manager -> SHELLDLL -> Desktop ListView
+        /// </summary>
+        private List<UIElementInfo> FindDesktopIcons()
+        {
+            var results = new List<UIElementInfo>();
+            try
+            {
+                // Desktop icons live under "Program Manager" window
+                IntPtr progMan = IntPtr.Zero;
+                EnumWindows((hWnd, lParam) =>
+                {
+                    string title = GetWindowTitle(hWnd);
+                    if (title == "Program Manager")
+                    {
+                        progMan = hWnd;
+                        return false; // Stop enumeration
+                    }
+                    return true;
+                }, IntPtr.Zero);
+                
+                if (progMan == IntPtr.Zero) return results;
+                
+                var desktopRoot = AutomationElement.FromHandle(progMan);
+                if (desktopRoot == null) return results;
+                
+                // Find all ListItems (desktop icons are ListItems)
+                var elements = desktopRoot.FindAll(TreeScope.Descendants, 
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem));
+                
+                foreach (AutomationElement el in elements)
+                {
+                    if (!string.IsNullOrWhiteSpace(el.Current.Name))
+                    {
+                        AddElementInfo(results, el, "DesktopIcon");
+                    }
+                }
+                
+                System.Diagnostics.Debug.WriteLine($"[Automation] Found {results.Count} desktop icons");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Automation] Desktop icon search error: {ex.Message}");
+            }
+            return results;
         }
 
         /// <summary>

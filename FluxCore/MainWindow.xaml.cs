@@ -871,7 +871,6 @@ Look at screen and continue.";
         {
             ChatList.Visibility = Visibility.Visible;
             MemoryPanel.Visibility = Visibility.Collapsed;
-            StatsPanel.Visibility = Visibility.Collapsed;
             UpdateTabColors("chat");
         }
 
@@ -879,7 +878,6 @@ Look at screen and continue.";
         {
             ChatList.Visibility = Visibility.Collapsed;
             MemoryPanel.Visibility = Visibility.Visible;
-            StatsPanel.Visibility = Visibility.Collapsed;
             UpdateTabColors("memory");
             
             // Load memories
@@ -890,32 +888,10 @@ Look at screen and continue.";
             }
         }
 
-        private async void Tab_Stats_Click(object sender, RoutedEventArgs e)
-        {
-            ChatList.Visibility = Visibility.Collapsed;
-            MemoryPanel.Visibility = Visibility.Collapsed;
-            StatsPanel.Visibility = Visibility.Visible;
-            UpdateTabColors("stats");
-            
-            // Update stats
-            var duration = DateTime.Now - _appStartTime;
-            StatsDuration.Text = $"{(int)duration.TotalHours}h {duration.Minutes}m";
-            StatsMessages.Text = Messages.Count.ToString();
-            
-            if (_memory != null)
-            {
-                var stats = await _memory.GetSessionStatsAsync(_appStartTime);
-                StatsMemories.Text = stats.TotalMemories.ToString();
-                StatsTopApps.Text = string.Join(", ", stats.TopApps);
-                StatsSessionSummary.Text = stats.SessionSummary;
-            }
-        }
-
         private void UpdateTabColors(string activeTab)
         {
             TabChat.Foreground = activeTab == "chat" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
             TabMemory.Foreground = activeTab == "memory" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
-            TabStats.Foreground = activeTab == "stats" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
         }
         private void NameBox_TextChanged(object sender, TextChangedEventArgs e) { _panelName = NameBox.Text; TitleText.Text = _panelName.ToUpper(); }
 
@@ -1024,12 +1000,41 @@ Look at screen and continue.";
             }
         }
 
-        private void ApplyColors()
+        // =========================================
+        // SETTINGS HANDLERS
+        // =========================================
+        private AppSettings _settings = new AppSettings();
+        
+        private void SliderOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            if (SliderR == null || TintBrush == null) return;
-            TintBrush.Color = Color.FromArgb((byte)SliderAlpha.Value, (byte)SliderR.Value, (byte)SliderG.Value, (byte)SliderB.Value);
+            if (!IsLoaded) return;
+            this.Opacity = SliderOpacity.Value;
+            _settings.WindowOpacity = SliderOpacity.Value;
+            _settings.Save();
         }
-        private void ColorSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) { if (IsLoaded) ApplyColors(); }
+        
+        private void SliderBlur_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!IsLoaded) return;
+            BackgroundBlur.Radius = SliderBlur.Value;
+            _settings.BlurRadius = SliderBlur.Value;
+            _settings.Save();
+        }
+        
+        private void AutoMinimize_Changed(object sender, RoutedEventArgs e)
+        {
+            _settings.AutoMinimizeOnComplete = AutoMinimizeCheck.IsChecked == true;
+            _settings.Save();
+        }
+        
+        private void Btn_Minimize_Click(object sender, RoutedEventArgs e) => this.WindowState = WindowState.Minimized;
+        
+        private void Btn_ClearChat_Click(object sender, RoutedEventArgs e)
+        {
+            Messages.Clear();
+            AddMessage("Chat cleared.", false);
+        }
+        
         private void ToggleSettings_Click(object sender, RoutedEventArgs e) => SettingsPanel.Visibility = (SettingsPanel.Visibility == Visibility.Visible) ? Visibility.Collapsed : Visibility.Visible;
         private void OnDrag(object sender, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) this.DragMove(); }
 
@@ -1039,8 +1044,41 @@ Look at screen and continue.";
         public void FadeOut() { var a = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200)); a.Completed += (s, e) => Visibility = Visibility.Hidden; BeginAnimation(OpacityProperty, a); }
         public void ForceHide() { Dispatcher.Invoke(() => FadeOut()); }
 
-        private void LoadConfig() { try { if (File.Exists("config.json")) { var cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText("config.json")); if (cfg != null) { SliderR.Value = cfg.R; SliderG.Value = cfg.G; SliderB.Value = cfg.B; SliderAlpha.Value = cfg.Alpha; _panelName = cfg.Name ?? "Flux ai"; NameBox.Text = _panelName; TitleText.Text = _panelName.ToUpper(); _requireWakeWord = cfg.RequireWakeWord; WakeWordCheck.IsChecked = _requireWakeWord; } } } catch { } }
-        private void SaveConfig() { if (!_isSecondary) try { File.WriteAllText("config.json", JsonSerializer.Serialize(new AppConfig { R = SliderR.Value, G = SliderG.Value, B = SliderB.Value, Alpha = SliderAlpha.Value, Name = _panelName, RequireWakeWord = _requireWakeWord })); } catch { } }
+        private void LoadConfig()
+        {
+            try
+            {
+                _settings = AppSettings.Load();
+                SliderOpacity.Value = _settings.WindowOpacity;
+                SliderBlur.Value = _settings.BlurRadius;
+                _panelName = _settings.WakeWord;
+                NameBox.Text = _panelName;
+                TitleText.Text = _panelName.ToUpper();
+                _requireWakeWord = _settings.RequireWakeWord;
+                WakeWordCheck.IsChecked = _requireWakeWord;
+                AutoMinimizeCheck.IsChecked = _settings.AutoMinimizeOnComplete;
+                
+                // Apply settings
+                this.Opacity = _settings.WindowOpacity;
+                BackgroundBlur.Radius = _settings.BlurRadius;
+            }
+            catch { }
+        }
+        
+        private void SaveConfig()
+        {
+            if (!_isSecondary)
+            {
+                try
+                {
+                    _settings.WakeWord = _panelName;
+                    _settings.RequireWakeWord = _requireWakeWord;
+                    _settings.Save();
+                }
+                catch { }
+            }
+        }
+        
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); _ = _executor?.DisposeAsync(); }
 
         // =========================================

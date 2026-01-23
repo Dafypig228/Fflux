@@ -244,6 +244,429 @@ namespace FluxCore
         }
 
         // =========================================
+        // TIER 1: ESSENTIAL FILE OPERATIONS
+        // =========================================
+
+        /// <summary>
+        /// Copies a file to a new location with overwrite protection.
+        /// </summary>
+        public async Task<ExecutionResult> CopyFileAsync(string source, string dest, bool overwrite = false)
+        {
+            try
+            {
+                source = SanitizePath(source);
+                dest = SanitizePath(dest);
+
+                if (!File.Exists(source))
+                    return new ExecutionResult(false, $"Source file not found: {source}");
+
+                // If dest is a directory, append filename
+                if (Directory.Exists(dest))
+                    dest = Path.Combine(dest, Path.GetFileName(source));
+
+                // Check for overwrite
+                if (File.Exists(dest) && !overwrite)
+                    return new ExecutionResult(false, $"Destination exists (use overwrite flag): {dest}");
+
+                // Ensure dest directory exists
+                string? dir = Path.GetDirectoryName(dest);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                File.Copy(source, dest, overwrite);
+                return new ExecutionResult(true, $"Copied to: {dest}");
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Copy failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Safely deletes a file by moving it to the Recycle Bin.
+        /// </summary>
+        public async Task<ExecutionResult> DeleteFileAsync(string path)
+        {
+            try
+            {
+                path = SanitizePath(path);
+
+                if (!File.Exists(path) && !Directory.Exists(path))
+                    return new ExecutionResult(false, $"File/folder not found: {path}");
+
+                // Use Shell API to move to Recycle Bin (safe delete)
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                    path,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+
+                return new ExecutionResult(true, $"Moved to Recycle Bin: {Path.GetFileName(path)}");
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Delete failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Renames a file or folder with collision handling.
+        /// </summary>
+        public async Task<ExecutionResult> RenameFileAsync(string path, string newName)
+        {
+            try
+            {
+                path = SanitizePath(path);
+
+                if (!File.Exists(path) && !Directory.Exists(path))
+                    return new ExecutionResult(false, $"File/folder not found: {path}");
+
+                string? dir = Path.GetDirectoryName(path);
+                if (string.IsNullOrEmpty(dir)) dir = ".";
+                
+                string newPath = Path.Combine(dir, newName);
+
+                // Handle collision
+                if (File.Exists(newPath) || Directory.Exists(newPath))
+                {
+                    string baseName = Path.GetFileNameWithoutExtension(newName);
+                    string ext = Path.GetExtension(newName);
+                    int counter = 1;
+                    while (File.Exists(newPath) || Directory.Exists(newPath))
+                    {
+                        newPath = Path.Combine(dir, $"{baseName} ({counter}){ext}");
+                        counter++;
+                    }
+                }
+
+                if (File.Exists(path))
+                    File.Move(path, newPath);
+                else
+                    Directory.Move(path, newPath);
+
+                return new ExecutionResult(true, $"Renamed to: {Path.GetFileName(newPath)}");
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Rename failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gets detailed file information.
+        /// </summary>
+        public async Task<ExecutionResult> GetFileInfoAsync(string path)
+        {
+            try
+            {
+                path = SanitizePath(path);
+
+                if (!File.Exists(path) && !Directory.Exists(path))
+                    return new ExecutionResult(false, $"File/folder not found: {path}");
+
+                var sb = new StringBuilder();
+                
+                if (File.Exists(path))
+                {
+                    var info = new FileInfo(path);
+                    sb.AppendLine($"=== FILE INFO: {info.Name} ===");
+                    sb.AppendLine($"Full Path: {info.FullName}");
+                    sb.AppendLine($"Size: {FormatBytes(info.Length)}");
+                    sb.AppendLine($"Created: {info.CreationTime:yyyy-MM-dd HH:mm:ss}");
+                    sb.AppendLine($"Modified: {info.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
+                    sb.AppendLine($"Accessed: {info.LastAccessTime:yyyy-MM-dd HH:mm:ss}");
+                    sb.AppendLine($"Attributes: {info.Attributes}");
+                    sb.AppendLine($"Extension: {info.Extension}");
+                    sb.AppendLine($"Read-Only: {info.IsReadOnly}");
+                }
+                else
+                {
+                    var info = new DirectoryInfo(path);
+                    var files = info.GetFiles("*", SearchOption.AllDirectories);
+                    var dirs = info.GetDirectories("*", SearchOption.AllDirectories);
+                    long totalSize = files.Sum(f => f.Length);
+                    
+                    sb.AppendLine($"=== FOLDER INFO: {info.Name} ===");
+                    sb.AppendLine($"Full Path: {info.FullName}");
+                    sb.AppendLine($"Total Size: {FormatBytes(totalSize)}");
+                    sb.AppendLine($"Files: {files.Length}");
+                    sb.AppendLine($"Subfolders: {dirs.Length}");
+                    sb.AppendLine($"Created: {info.CreationTime:yyyy-MM-dd HH:mm:ss}");
+                    sb.AppendLine($"Modified: {info.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
+                }
+
+                return new ExecutionResult(true, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Info failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Reads text file content with encoding detection.
+        /// </summary>
+        public async Task<ExecutionResult> ReadFileAsync(string path, int maxLines = 100)
+        {
+            try
+            {
+                path = SanitizePath(path);
+
+                if (!File.Exists(path))
+                    return new ExecutionResult(false, $"File not found: {path}");
+
+                var info = new FileInfo(path);
+                if (info.Length > 1024 * 1024) // 1MB limit
+                    return new ExecutionResult(false, $"File too large ({FormatBytes(info.Length)}). Max 1MB.");
+
+                // Try to read with auto-detected encoding
+                string content = await File.ReadAllTextAsync(path);
+                var lines = content.Split('\n');
+                
+                var sb = new StringBuilder();
+                sb.AppendLine($"=== {Path.GetFileName(path)} ({lines.Length} lines) ===");
+                
+                int linesToShow = Math.Min(lines.Length, maxLines);
+                for (int i = 0; i < linesToShow; i++)
+                {
+                    sb.AppendLine(lines[i].TrimEnd('\r'));
+                }
+                
+                if (lines.Length > maxLines)
+                    sb.AppendLine($"\n... ({lines.Length - maxLines} more lines)");
+
+                return new ExecutionResult(true, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Read failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Sanitizes a path - handles OneDrive, wrong usernames, relative paths.
+        /// Also searches common directories if file not found.
+        /// </summary>
+        private string SanitizePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || path == ".")
+                return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
+            path = Environment.ExpandEnvironmentVariables(path);
+
+            string actualProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string actualDesktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string actualDocuments = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            string wrongDesktopPath = Path.Combine(actualProfile, "Desktop");
+
+            // Handle common shortcuts
+            if (path.Equals("Desktop", StringComparison.OrdinalIgnoreCase))
+                return actualDesktop;
+            if (path.Equals("Documents", StringComparison.OrdinalIgnoreCase))
+                return actualDocuments;
+            if (path.Equals("Downloads", StringComparison.OrdinalIgnoreCase))
+                return Path.Combine(actualProfile, "Downloads");
+            if (path.Equals("Pictures", StringComparison.OrdinalIgnoreCase))
+                return Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+            if (path.Equals("Videos", StringComparison.OrdinalIgnoreCase))
+                return Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+            if (path.Equals("Music", StringComparison.OrdinalIgnoreCase))
+                return Environment.GetFolderPath(Environment.SpecialFolder.MyMusic);
+
+            // Fix wrong username
+            if (path.StartsWith(@"C:\Users\User", StringComparison.OrdinalIgnoreCase))
+                path = path.Replace(@"C:\Users\User", actualProfile, StringComparison.OrdinalIgnoreCase);
+
+            // Fix wrong Desktop path (OneDrive)
+            if (!actualDesktop.Equals(wrongDesktopPath, StringComparison.OrdinalIgnoreCase) &&
+                path.StartsWith(wrongDesktopPath, StringComparison.OrdinalIgnoreCase))
+            {
+                path = path.Replace(wrongDesktopPath, actualDesktop, StringComparison.OrdinalIgnoreCase);
+            }
+            
+            // Fix wrong Documents path (OneDrive)
+            string wrongDocumentsPath = Path.Combine(actualProfile, "Documents");
+            if (!actualDocuments.Equals(wrongDocumentsPath, StringComparison.OrdinalIgnoreCase) &&
+                path.StartsWith(wrongDocumentsPath, StringComparison.OrdinalIgnoreCase))
+            {
+                path = path.Replace(wrongDocumentsPath, actualDocuments, StringComparison.OrdinalIgnoreCase);
+            }
+
+            // Handle relative paths - try to find the file
+            if (!Path.IsPathRooted(path))
+            {
+                // Search common locations for the file
+                string[] searchLocations = new[]
+                {
+                    actualDesktop,
+                    actualDocuments,
+                    Path.Combine(actualProfile, "Downloads"),
+                    @"C:\Users\Public\Desktop",
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+                };
+
+                foreach (var location in searchLocations)
+                {
+                    string candidate = Path.Combine(location, path);
+                    if (File.Exists(candidate) || Directory.Exists(candidate))
+                        return candidate;
+                    
+                    // Try with .lnk extension for shortcuts
+                    if (File.Exists(candidate + ".lnk"))
+                        return candidate + ".lnk";
+                }
+                
+                // Default to Desktop if not found
+                path = Path.Combine(actualDesktop, path);
+            }
+
+            return path;
+        }
+
+        public static string GetCommonPathsInfo()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("YOUR KNOWN PATHS (USE THESE EXACT PATHS):");
+            sb.AppendLine($"  Desktop: {Environment.GetFolderPath(Environment.SpecialFolder.Desktop)}");
+            sb.AppendLine($"  Documents: {Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)}");
+            sb.AppendLine($"  Downloads: {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")}");
+            sb.AppendLine($"  Pictures: {Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)}");
+            sb.AppendLine($"  Public Desktop: C:\\Users\\Public\\Desktop");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// SMART FILE DISCOVERY: Searches common directories to find a file by name.
+        /// Returns the full path if found, null if not found.
+        /// </summary>
+        public string? SmartFindFile(string filename)
+        {
+            if (string.IsNullOrWhiteSpace(filename)) return null;
+
+            // If it's already a valid full path, return it
+            if (Path.IsPathRooted(filename) && (File.Exists(filename) || Directory.Exists(filename)))
+                return filename;
+
+            // Extract just the filename if a path was given
+            string searchName = Path.GetFileName(filename);
+            
+            string[] searchRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
+                @"C:\Users\Public\Desktop",
+            };
+
+            foreach (var root in searchRoots)
+            {
+                if (!Directory.Exists(root)) continue;
+                
+                try
+                {
+                    // Check root directory first (fast)
+                    string directPath = Path.Combine(root, searchName);
+                    if (File.Exists(directPath)) return directPath;
+                    if (File.Exists(directPath + ".lnk")) return directPath + ".lnk";
+                    if (Directory.Exists(directPath)) return directPath;
+
+                    // Recursive search (depth limited for speed)
+                    var found = Directory.EnumerateFiles(root, searchName, SearchOption.AllDirectories)
+                        .FirstOrDefault();
+                    if (found != null) return found;
+
+                    // Try with .lnk
+                    if (!searchName.EndsWith(".lnk"))
+                    {
+                        found = Directory.EnumerateFiles(root, searchName + ".lnk", SearchOption.AllDirectories)
+                            .FirstOrDefault();
+                        if (found != null) return found;
+                    }
+                }
+                catch { /* Access denied to some folders - continue */ }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// SEARCH_FILES command: Searches for files matching a pattern across common directories.
+        /// AI should use this BEFORE trying to operate on files.
+        /// </summary>
+        public async Task<ExecutionResult> SearchFilesAsync(string pattern)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(pattern))
+                    return new ExecutionResult(false, "Usage: SEARCH_FILES:filename or pattern (e.g., *.pdf, notes*)");
+
+                var results = new List<string>();
+                
+                string[] searchRoots = new[]
+                {
+                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+                    @"C:\Users\Public\Desktop",
+                };
+
+                foreach (var root in searchRoots)
+                {
+                    if (!Directory.Exists(root)) continue;
+                    
+                    try
+                    {
+                        var files = Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories)
+                            .Take(20)
+                            .ToList();
+                        results.AddRange(files);
+                        
+                        var dirs = Directory.EnumerateDirectories(root, pattern, SearchOption.AllDirectories)
+                            .Take(10)
+                            .ToList();
+                        results.AddRange(dirs);
+                    }
+                    catch { /* Access denied - continue */ }
+                    
+                    if (results.Count >= 30) break;
+                }
+
+                if (results.Count == 0)
+                    return new ExecutionResult(false, $"No files found matching '{pattern}'. Try a different pattern or check the filename.");
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"=== SEARCH RESULTS for '{pattern}' ({results.Count} found) ===");
+                sb.AppendLine("USE THESE EXACT PATHS for file operations:");
+                foreach (var r in results.Take(30))
+                {
+                    bool isDir = Directory.Exists(r);
+                    sb.AppendLine($"  {(isDir ? "[DIR]" : "[FILE]")} {r}");
+                }
+                
+                return new ExecutionResult(true, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Search failed: {ex.Message}");
+            }
+        }
+
+        private string FormatBytes(long bytes)
+        {
+            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+            int order = 0;
+            double size = bytes;
+            while (size >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                size /= 1024;
+            }
+            return $"{size:0.##} {sizes[order]}";
+        }
+
+        // =========================================
         // DIRECT FILE OPERATIONS
         // =========================================
 
@@ -472,9 +895,16 @@ namespace FluxCore
         {
             try
             {
-                // Escape for PowerShell
-                string escapedCmd = command.Replace("\"", "\\\"");
-                return await RunProcessAsync("powershell.exe", $"-NoProfile -NonInteractive -Command \"{escapedCmd}\"");
+                // CRITICAL: Use UTF-8 encoding for Cyrillic/Unicode support
+                // Set BOTH input AND output encoding to UTF-8
+                string utf8Prefix = "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ";
+                string fullCommand = utf8Prefix + command;
+                
+                // Use -EncodedCommand with Base64 to avoid encoding issues in arguments
+                byte[] commandBytes = Encoding.Unicode.GetBytes(fullCommand);
+                string encodedCommand = Convert.ToBase64String(commandBytes);
+                
+                return await RunProcessAsync("powershell.exe", $"-NoProfile -NonInteractive -EncodedCommand {encodedCommand}");
             }
             catch (Exception ex)
             {

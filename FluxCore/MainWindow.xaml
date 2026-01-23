@@ -1,34 +1,34 @@
 ﻿<Window x:Class="FluxCore.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="FluxCore Hub"
-        Width="460"
+        Title="Fluxoria"
+        Width="340"
         SizeToContent="Height" 
-        MinHeight="250" MaxHeight="800"
+        MinHeight="180" MaxHeight="600"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
         Topmost="True"
         ShowInTaskbar="False" 
         ResizeMode="CanResizeWithGrip"
-        Opacity="0" 
+        Opacity="1" 
         Closing="Window_Closing">
-    
 
     <Window.Resources>
+        <!-- Clean minimal button -->
         <Style x:Key="CleanBtn" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#AAFFFFFF"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding" Value="10,5"/>
-            <Setter Property="Margin" Value="2,0"/>
-            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Margin" Value="1,0"/>
+            <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="6">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="4">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -45,33 +45,35 @@
             </Setter>
         </Style>
 
-        <Style x:Key="DebugBtn" TargetType="Button" BasedOn="{StaticResource CleanBtn}">
-            <Setter Property="Background" Value="#10FFFFFF"/>
-            <Setter Property="FontSize" Value="11"/>
-            <Setter Property="Margin" Value="2"/>
-            <Setter Property="Height" Value="28"/>
+        <!-- Tab button style -->
+        <Style x:Key="TabBtn" TargetType="Button" BasedOn="{StaticResource CleanBtn}">
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Padding" Value="10,5"/>
         </Style>
 
+        <!-- Glass textbox -->
         <Style x:Key="GlassBox" TargetType="TextBox">
             <Setter Property="Background" Value="#10000000"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding" Value="6"/>
+            <Setter Property="Padding" Value="8,6"/>
             <Setter Property="CaretBrush" Value="#00FFD1"/>
-            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
 
+        <!-- Neon checkbox -->
         <Style x:Key="NeonCheck" TargetType="CheckBox">
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="10"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="CheckBox">
                         <StackPanel Orientation="Horizontal">
-                            <Border x:Name="box" Width="16" Height="16" CornerRadius="3" BorderBrush="#00FFD1" BorderThickness="1" Background="Transparent" Margin="0,0,8,0">
-                                <Path x:Name="check" Data="M 2,8 L 6,12 L 14,2" Stroke="#00FFD1" StrokeThickness="2" Visibility="Collapsed"/>
+                            <Border x:Name="box" Width="14" Height="14" CornerRadius="3" BorderBrush="#00FFD1" BorderThickness="1" Background="Transparent" Margin="0,0,6,0">
+                                <Path x:Name="check" Data="M 2,7 L 5,10 L 12,2" Stroke="#00FFD1" StrokeThickness="1.5" Visibility="Collapsed"/>
                             </Border>
                             <ContentPresenter VerticalAlignment="Center"/>
                         </StackPanel>
@@ -85,14 +87,21 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Slider style -->
+        <Style x:Key="NeonSlider" TargetType="Slider">
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Margin" Value="0,2"/>
+        </Style>
     </Window.Resources>
 
-    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#30FFFFFF" CornerRadius="12" Padding="15" MouseLeftButtonDown="OnDrag">
+    <!-- Main container with blur effect -->
+    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#25FFFFFF" CornerRadius="10" Padding="10" MouseLeftButtonDown="OnDrag">
         <Border.Background>
-            <SolidColorBrush x:Name="TintBrush" Color="#EE101012"/>
+            <SolidColorBrush x:Name="TintBrush" Color="#F0101015"/>
         </Border.Background>
         <Border.Effect>
-            <DropShadowEffect BlurRadius="25" ShadowDepth="5" Opacity="0.5" Direction="270"/>
+            <BlurEffect x:Name="BackgroundBlur" Radius="0"/>
         </Border.Effect>
 
         <Grid>
@@ -104,6 +113,7 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
+            <!-- HEADER -->
             <Grid Grid.Row="0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -112,110 +122,86 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#00FFD1" Margin="0,0,8,0">
+                    <Ellipse x:Name="StatusDot" Width="6" Height="6" Fill="#00FFD1" Margin="0,0,6,0">
                         <Ellipse.Effect>
-                            <DropShadowEffect Color="#00FFD1" BlurRadius="5" ShadowDepth="0"/>
+                            <DropShadowEffect Color="#00FFD1" BlurRadius="4" ShadowDepth="0"/>
                         </Ellipse.Effect>
                     </Ellipse>
-                    <TextBlock x:Name="TitleText" Text="FLUX AI" Foreground="White" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" FontSize="14"/>
+                    <TextBlock x:Name="TitleText" Text="FLUXORIA" Foreground="White" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" FontSize="11"/>
                 </StackPanel>
 
-                <StackPanel x:Name="TopControls" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Button Content="+ NEW" Style="{StaticResource CleanBtn}" Click="Btn_NewPanel_Click"/>
-                    <Button x:Name="BtnMic" Content="🎤 ON" Style="{StaticResource CleanBtn}" Click="Btn_Mic_Click" Foreground="#00FFD1"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Button x:Name="BtnMic" Content="🎤" Style="{StaticResource CleanBtn}" Click="Btn_Mic_Click" Foreground="#00FFD1" ToolTip="Toggle Microphone"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button Content="⚙" Click="ToggleSettings_Click" Width="30" Padding="0" Style="{StaticResource CleanBtn}"/>
-                    <Button Content="✕" Click="Btn_Exit_Click" Width="30" Padding="0" Style="{StaticResource CleanBtn}" Foreground="#FF5555" Panel.ZIndex="100"/>
+                    <Button Content="⚙" Click="ToggleSettings_Click" Width="24" Height="24" Padding="0" Style="{StaticResource CleanBtn}" ToolTip="Settings"/>
+                    <Button Content="─" Click="Btn_Minimize_Click" Width="24" Height="24" Padding="0" Style="{StaticResource CleanBtn}" ToolTip="Minimize"/>
+                    <Button Content="✕" Click="Btn_Exit_Click" Width="24" Height="24" Padding="0" Style="{StaticResource CleanBtn}" Foreground="#FF5555"/>
                 </StackPanel>
             </Grid>
 
-            <Border Grid.Row="1" BorderBrush="#20FFFFFF" BorderThickness="0,0,0,1" Margin="0,10,0,5" Padding="0,0,0,5">
+            <!-- STATUS BAR -->
+            <Border Grid.Row="1" Margin="0,8,0,4">
                 <StackPanel>
-                    <TextBlock x:Name="StatusText" Text="Waiting..." Foreground="#50FFFFFF" FontSize="10" FontFamily="Consolas" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                    <TextBlock x:Name="StatusText" Text="Ready" Foreground="#50FFFFFF" FontSize="9" FontFamily="Consolas" HorizontalAlignment="Center"/>
                     
-                    <!-- NEURO-HUD (Brain Visualization) -->
-                    <!-- NEURO-HUD (Compact) -->
-                    <Border x:Name="NeuroHudPanel" Visibility="Collapsed" Background="#1000FFD1" BorderBrush="#3000FFD1" BorderThickness="1" CornerRadius="6" Padding="8" Margin="5,0,5,5">
-                        <StackPanel>
-                            <!-- State Header -->
-                            <DockPanel LastChildFill="True" Margin="0,0,0,2">
-                                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
-                                     <Border x:Name="HudValidationBadge" Background="#2000FF00" CornerRadius="3" Padding="4,1" Margin="5,0,0,0" Visibility="Collapsed">
-                                         <TextBlock Text="👁️ VERIFIED" FontSize="8" Foreground="#00FF00" FontWeight="Bold"/>
-                                     </Border>
-                                </StackPanel>
-                                <StackPanel Orientation="Horizontal">
-                                    <Ellipse x:Name="HudStateLight" Width="6" Height="6" Fill="#00FFD1" Margin="0,0,6,0">
-                                        <Ellipse.Effect>
-                                            <DropShadowEffect Color="#00FFD1" BlurRadius="3" ShadowDepth="0"/>
-                                        </Ellipse.Effect>
-                                    </Ellipse>
-                                    <TextBlock x:Name="HudStateText" Text="THINKING..." FontWeight="Bold" Foreground="#00FFD1" FontSize="10" FontFamily="Consolas"/>
-                                </StackPanel>
-                            </DockPanel>
-
-                            <!-- Brain Activity (ScrollViewer for overflow) -->
-                            <TextBlock x:Name="HudContentText" Text="Analyzing..." TextWrapping="Wrap" FontSize="10" Foreground="#EEF" FontFamily="Segoe UI" Margin="0,2,0,2" MaxHeight="50" TextTrimming="CharacterEllipsis" Opacity="0.8"/>
-                            
-                            <!-- Action Preview -->
-                            <Border x:Name="HudActionBox" Background="#20FFFFFF" CornerRadius="3" Padding="4,2" Visibility="Collapsed" Margin="0,2,0,0">
-                                <TextBlock x:Name="HudActionText" Text="ACTION: [[...]]" Foreground="#00FFD1" FontFamily="Consolas" FontSize="9"/>
-                            </Border>
-                        </StackPanel>
-                    </Border>
-
                     <!-- TAB NAVIGATION -->
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                        <Button x:Name="TabChat" Content="💬 CHAT" Style="{StaticResource CleanBtn}" Click="Tab_Chat_Click" Foreground="#00FFD1" FontSize="11"/>
-                        <Button x:Name="TabMemory" Content="🧠 MEMORY" Style="{StaticResource CleanBtn}" Click="Tab_Memory_Click" FontSize="11"/>
-                        <Button x:Name="TabStats" Content="📊 STATS" Style="{StaticResource CleanBtn}" Click="Tab_Stats_Click" FontSize="11"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,6,0,0">
+                        <Button x:Name="TabChat" Content="💬 Chat" Style="{StaticResource TabBtn}" Click="Tab_Chat_Click" Foreground="#00FFD1"/>
+                        <Button x:Name="TabMemory" Content="🧠 Memory" Style="{StaticResource TabBtn}" Click="Tab_Memory_Click"/>
                     </StackPanel>
                 </StackPanel>
             </Border>
 
-            <Border x:Name="SettingsPanel" Grid.Row="2" Visibility="Collapsed" Background="#FA050505" CornerRadius="6" Padding="12" Margin="0,0,0,10" BorderBrush="#30FFFFFF" BorderThickness="1">
+            <!-- SETTINGS PANEL -->
+            <Border x:Name="SettingsPanel" Grid.Row="2" Visibility="Collapsed" Background="#10FFFFFF" CornerRadius="6" Padding="10" Margin="0,0,0,6">
                 <StackPanel>
-                    <DockPanel Margin="0,0,0,10">
-                        <TextBlock Text="NAME:" Foreground="Gray" FontSize="10" VerticalAlignment="Center" Width="50" FontWeight="Bold"/>
-                        <TextBox x:Name="NameBox" Text="Flux ai" Style="{StaticResource GlassBox}" TextChanged="NameBox_TextChanged"/>
+                    <!-- Opacity slider -->
+                    <DockPanel Margin="0,0,0,6">
+                        <TextBlock Text="Opacity" Foreground="#80FFFFFF" FontSize="9" Width="50" VerticalAlignment="Center"/>
+                        <Slider x:Name="SliderOpacity" Style="{StaticResource NeonSlider}" Minimum="0.3" Maximum="1" Value="0.95" ValueChanged="SliderOpacity_Changed"/>
                     </DockPanel>
 
-                    <CheckBox x:Name="WakeWordCheck" Content="REQUIRE NAME (Wake Word)" IsChecked="True" Style="{StaticResource NeonCheck}" FontSize="11" Margin="0,0,0,15" Checked="WakeWord_Changed" Unchecked="WakeWord_Changed"/>
+                    <!-- Blur slider -->
+                    <DockPanel Margin="0,0,0,8">
+                        <TextBlock Text="Blur" Foreground="#80FFFFFF" FontSize="9" Width="50" VerticalAlignment="Center"/>
+                        <Slider x:Name="SliderBlur" Style="{StaticResource NeonSlider}" Minimum="0" Maximum="30" Value="10" ValueChanged="SliderBlur_Changed"/>
+                    </DockPanel>
 
-                    <TextBlock Text="OPACITY" Foreground="#80FFFFFF" FontSize="10" HorizontalAlignment="Center" FontWeight="Bold" Margin="0,0,0,5"/>
-                    <Slider x:Name="SliderAlpha" Minimum="0" Maximum="255" Value="230" ValueChanged="ColorSlider_Changed"/>
-                    <UniformGrid Columns="3" Margin="0,5,0,15">
-                        <Slider x:Name="SliderR" Maximum="255" Value="16" ValueChanged="ColorSlider_Changed"/>
-                        <Slider x:Name="SliderG" Maximum="255" Value="16" ValueChanged="ColorSlider_Changed"/>
-                        <Slider x:Name="SliderB" Maximum="255" Value="18" ValueChanged="ColorSlider_Changed"/>
-                    </UniformGrid>
+                    <!-- Wake word -->
+                    <DockPanel Margin="0,0,0,6">
+                        <TextBlock Text="Name" Foreground="#80FFFFFF" FontSize="9" Width="50" VerticalAlignment="Center"/>
+                        <TextBox x:Name="NameBox" Text="Fluxoria" Style="{StaticResource GlassBox}" FontSize="11" TextChanged="NameBox_TextChanged"/>
+                    </DockPanel>
 
-                    <TextBlock Text="DEBUG" Foreground="#00FFD1" FontSize="10" HorizontalAlignment="Center" Margin="0,5" FontWeight="Bold"/>
-                    <UniformGrid Columns="3">
-                        <Button Content="📝 PROMPT" Style="{StaticResource DebugBtn}" Click="Btn_DebugDump_Click"/>
-                        <Button Content="👁️ OCR" Style="{StaticResource DebugBtn}" Click="Btn_DebugOCR_Click"/>
-                        <Button Content="📜 LOGS" Style="{StaticResource DebugBtn}" Click="Btn_ShowLogs_Click"/>
+                    <!-- Checkboxes -->
+                    <CheckBox x:Name="WakeWordCheck" Content="Require wake word" IsChecked="True" Style="{StaticResource NeonCheck}" Margin="0,0,0,4" Checked="WakeWord_Changed" Unchecked="WakeWord_Changed"/>
+                    <CheckBox x:Name="AutoMinimizeCheck" Content="Auto-minimize on complete" IsChecked="True" Style="{StaticResource NeonCheck}" Margin="0,0,0,6" Checked="AutoMinimize_Changed" Unchecked="AutoMinimize_Changed"/>
+
+                    <!-- Useful buttons -->
+                    <UniformGrid Columns="3" Margin="0,4,0,0">
+                        <Button Content="📋 Logs" Style="{StaticResource CleanBtn}" Click="Btn_ShowLogs_Click" FontSize="9"/>
+                        <Button Content="🗑️ Clear" Style="{StaticResource CleanBtn}" Click="Btn_ClearChat_Click" FontSize="9"/>
+                        <Button Content="🔄 Reset" Style="{StaticResource CleanBtn}" Click="Btn_ResetAudio_Click" FontSize="9" ToolTip="Reset Audio"/>
                     </UniformGrid>
-                    <Button Content="♻️ RESTART AUDIO ENGINE" Style="{StaticResource DebugBtn}" Click="Btn_ResetAudio_Click" Margin="0,5,0,0"/>
                 </StackPanel>
             </Border>
 
+            <!-- CHAT LIST -->
             <ListView x:Name="ChatList" Grid.Row="3" 
                       Background="Transparent" 
                       BorderThickness="0" 
-                      Margin="0,5,0,0"
-                      Padding="10,10,10,50" 
+                      Margin="0,2,0,0"
+                      Padding="2,2,2,30" 
                       ScrollViewer.HorizontalScrollBarVisibility="Disabled" 
                       ScrollViewer.VerticalScrollBarVisibility="Auto"
-                      ScrollViewer.CanContentScroll="False" 
-                      BorderBrush="{x:Null}">
+                      ScrollViewer.CanContentScroll="False">
 
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="Focusable" Value="False"/>
-                        <Setter Property="Margin" Value="0,3"/>
+                        <Setter Property="Margin" Value="0,2"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ListViewItem">
@@ -228,53 +214,43 @@
 
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Border CornerRadius="12" Padding="12,10" Margin="0,0,15,0">
+                        <Border CornerRadius="8" Padding="8,6" Margin="0,0,10,0" MaxWidth="280">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="HorizontalAlignment" Value="Left"/>
-                                    <Setter Property="Background" Value="#15FFFFFF"/>
+                                    <Setter Property="Background" Value="#12FFFFFF"/>
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsUser}" Value="True">
                                             <Setter Property="HorizontalAlignment" Value="Right"/>
-                                            <Setter Property="Background" Value="#3300FFD1"/>
+                                            <Setter Property="Background" Value="#2500FFD1"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
 
-                            <TextBox Text="{Binding Text}" 
+                            <TextBlock Text="{Binding Text}" 
                                      TextWrapping="Wrap" 
-                                     Foreground="#F0F0F0" 
-                                     FontSize="13" 
-                                     FontFamily="Segoe UI"
-                                     Background="Transparent"
-                                     BorderThickness="0"
-                                     IsReadOnly="True"
-                                     IsHitTestVisible="True"/>
+                                     Foreground="#E8E8E8" 
+                                     FontSize="11" 
+                                     FontFamily="Segoe UI"/>
                         </Border>
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
 
             <!-- MEMORY PANEL -->
-            <Border x:Name="MemoryPanel" Grid.Row="3" Visibility="Collapsed" Background="#10FFFFFF" CornerRadius="8" Margin="0,5,0,0" Padding="10">
+            <Border x:Name="MemoryPanel" Grid.Row="3" Visibility="Collapsed" Background="#08FFFFFF" CornerRadius="6" Margin="0,2,0,0" Padding="8">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Text="🧠 MEMORY BANK" Foreground="#00FFD1" FontWeight="Bold" FontSize="12" Margin="0,0,0,10"/>
-                    <ListView x:Name="MemoryList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="11">
+                    <TextBlock Text="🧠 Memory Bank" Foreground="#00FFD1" FontWeight="Bold" FontSize="10" Margin="0,0,0,6"/>
+                    <ListView x:Name="MemoryList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="10">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <Border Background="#15FFFFFF" CornerRadius="6" Padding="8" Margin="0,2">
-                                    <StackPanel>
-                                        <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="#E0E0E0" FontSize="11"/>
-                                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                                            <TextBlock Text="{Binding SourceApp}" Foreground="#00FFD1" FontSize="9" Margin="0,0,10,0"/>
-                                            <TextBlock Text="{Binding Timestamp, StringFormat='{}{0:HH:mm}'}" Foreground="#606060" FontSize="9"/>
-                                        </StackPanel>
-                                    </StackPanel>
+                                <Border Background="#10FFFFFF" CornerRadius="4" Padding="6" Margin="0,1">
+                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="#D0D0D0" FontSize="10"/>
                                 </Border>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -282,98 +258,33 @@
                 </Grid>
             </Border>
 
-            <!-- STATS PANEL -->
-            <Border x:Name="StatsPanel" Grid.Row="3" Visibility="Collapsed" Background="#10FFFFFF" CornerRadius="8" Margin="0,5,0,0" Padding="15">
-                <StackPanel>
-                    <TextBlock Text="📊 SESSION STATISTICS" Foreground="#00FFD1" FontWeight="Bold" FontSize="12" Margin="0,0,0,15"/>
-                    
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="Session Duration:" Foreground="#AAAAAA" FontSize="11"/>
-                        <TextBlock x:Name="StatsDuration" Grid.Column="1" Text="0h 0m" Foreground="White" FontSize="11" FontWeight="Bold"/>
-                    </Grid>
-                    
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="Messages:" Foreground="#AAAAAA" FontSize="11"/>
-                        <TextBlock x:Name="StatsMessages" Grid.Column="1" Text="0" Foreground="White" FontSize="11" FontWeight="Bold"/>
-                    </Grid>
-                    
-                    <Grid Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="Memories Stored:" Foreground="#AAAAAA" FontSize="11"/>
-                        <TextBlock x:Name="StatsMemories" Grid.Column="1" Text="0" Foreground="White" FontSize="11" FontWeight="Bold"/>
-                    </Grid>
-                    
-                    <TextBlock Text="TOP APPS" Foreground="#00FFD1" FontSize="10" FontWeight="Bold" Margin="0,10,0,5"/>
-                    <TextBlock x:Name="StatsTopApps" Text="Loading..." Foreground="#808080" FontSize="10" TextWrapping="Wrap"/>
-                    
-                    <TextBlock Text="SESSION SUMMARY" Foreground="#00FFD1" FontSize="10" FontWeight="Bold" Margin="0,15,0,5"/>
-                    <TextBlock x:Name="StatsSessionSummary" Text="Analyzing..." Foreground="#808080" FontSize="10" TextWrapping="Wrap"/>
-                </StackPanel>
-            </Border>
-
-            <Border Grid.Row="4" Background="#15FFFFFF" CornerRadius="15" Padding="3" Margin="0,5,0,0">
+            <!-- INPUT BOX -->
+            <Border Grid.Row="4" Background="#12FFFFFF" CornerRadius="10" Padding="2" Margin="0,4,0,0">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="InputBox" Style="{StaticResource GlassBox}" VerticalContentAlignment="Center"/>
-                    <Button Grid.Column="1" Content="➤" Click="Btn_Send_Click" Style="{StaticResource CleanBtn}" Foreground="#00FFD1" Width="35" Height="35" Padding="0"/>
+                    <TextBox x:Name="InputBox" Style="{StaticResource GlassBox}" FontSize="11"/>
+                    <Button Grid.Column="1" Content="➤" Click="Btn_Send_Click" Style="{StaticResource CleanBtn}" Foreground="#00FFD1" Width="30" Height="30" Padding="0"/>
                 </Grid>
             </Border>
 
+            <!-- LOG OVERLAY -->
             <Grid x:Name="LogOverlay" Grid.RowSpan="5" Visibility="Collapsed" Background="#F0050505">
-                <Border Background="#101010" BorderBrush="#30FFFFFF" BorderThickness="1" CornerRadius="8" Margin="20">
+                <Border Background="#101010" BorderBrush="#20FFFFFF" BorderThickness="1" CornerRadius="6" Margin="10">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <DockPanel Grid.Row="0" Margin="10">
-                            <TextBlock Text="SYSTEM LOGS" Foreground="#00FFD1" FontWeight="Bold" VerticalAlignment="Center"/>
-                            <Button Content="✕ CLOSE" Click="Btn_CloseLogs_Click" HorizontalAlignment="Right" Style="{StaticResource CleanBtn}" Foreground="#FF5555"/>
+                        <DockPanel Grid.Row="0" Margin="8">
+                            <TextBlock Text="LOGS" Foreground="#00FFD1" FontWeight="Bold" FontSize="10" VerticalAlignment="Center"/>
+                            <Button Content="✕" Click="Btn_CloseLogs_Click" HorizontalAlignment="Right" Style="{StaticResource CleanBtn}" Foreground="#FF5555"/>
                         </DockPanel>
-                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#AAAAAA" BorderThickness="0" 
-                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="10" IsReadOnly="True" FontFamily="Consolas" FontSize="11"/>
+                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#999999" BorderThickness="0" 
+                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="8" IsReadOnly="True" FontFamily="Consolas" FontSize="9"/>
                     </Grid>
-                </Border>
-            </Grid>
-
-            <!-- PERMISSION DIALOG -->
-            <Grid x:Name="PermissionOverlay" Grid.RowSpan="5" Visibility="Collapsed" Background="#E0000000">
-                <Border Background="#151515" BorderBrush="#00FFD1" BorderThickness="2" CornerRadius="12" 
-                        Margin="30" Padding="20" VerticalAlignment="Center" MaxWidth="380">
-                    <StackPanel>
-                        <TextBlock Text="🔐 PERMISSION REQUEST" Foreground="#00FFD1" FontWeight="Bold" FontSize="14" HorizontalAlignment="Center" Margin="0,0,0,15"/>
-                        
-                        <TextBlock x:Name="PermissionActionText" Text="Flux wants to perform an action:" 
-                                   Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                        
-                        <Border Background="#10FFFFFF" CornerRadius="6" Padding="10" Margin="0,0,0,15">
-                            <TextBlock x:Name="PermissionDetailsText" Text="[[ACTION DETAILS]]" 
-                                       Foreground="White" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
-                        </Border>
-                        
-                        <UniformGrid Columns="2" Margin="0,10,0,0">
-                            <Button x:Name="BtnPermissionDeny" Content="❌ DENY" Style="{StaticResource CleanBtn}" 
-                                    Background="#30FF5555" Foreground="#FF5555" Margin="0,0,5,0" Height="35"
-                                    Click="Btn_PermissionDeny_Click"/>
-                            <Button x:Name="BtnPermissionAllow" Content="✅ ALLOW" Style="{StaticResource CleanBtn}" 
-                                    Background="#3000FFD1" Foreground="#00FFD1" Margin="5,0,0,0" Height="35"
-                                    Click="Btn_PermissionAllow_Click"/>
-                        </UniformGrid>
-                    </StackPanel>
                 </Border>
             </Grid>
 
