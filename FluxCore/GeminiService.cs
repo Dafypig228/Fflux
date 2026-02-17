@@ -45,25 +45,39 @@ namespace FluxCore
         // ==========================================
         // 1. НОВЫЙ МЕТОД (С ПАМЯТЬЮ И ИСТОРИЕЙ)
         // ==========================================
-        public async Task<string> ChatWithHistory(List<ChatMessage> history, string userNewInput, string screenContext, string activeApp, string memories)
+        public async Task<string> ChatWithHistory(List<ChatMessage> history, string userNewInput, string screenContext, string activeApp, string memories, string? systemInstructionOverride = null)
         {
             // 1. Формируем "Системный Промпт" (Контекст момента)
-            // 1. Формируем "Системный Промпт" (Контекст момента)
             // Если screenContext содержит Base64, мы не пихаем его в текст, а пишем заглушку.
-            string visualTextLog = screenContext.StartsWith("BASE64:") ? "[IMAGE ATTACHED]" : screenContext;
+            string visualTextLog = !string.IsNullOrEmpty(screenContext) && screenContext.StartsWith("BASE64:") ? "[IMAGE ATTACHED]" : (screenContext ?? "");
 
-            var systemInstruction = $@"
-FLUX: Windows AI. Execute with [[COMMAND:arg]]
+            string systemInstruction;
+            if (systemInstructionOverride != null)
+            {
+                // FluxBrain provides a clean prompt for conversation (no command forcing)
+                systemInstruction = systemInstructionOverride;
+            }
+            else
+            {
+                // Default: action-oriented prompt for JarvisCore
+                systemInstruction = $@"
+You are Fluxoria, an AI assistant that controls a Windows PC.
 
-[[KEYS:WIN+D]] [[WINDOW:close]] [[OPEN_APP:appname]] [[TYPE:txt]] [[CLICK:text OR x,y]] [[LOG:text]]
+MODES:
+1. CONVERSATION: If user is chatting (greetings, questions, small talk) → respond with natural text. NO commands.
+2. ACTION: If user wants you to DO something on the PC → use [[COMMAND:arg]] format.
+
+Available commands: [[KEYS:combo]] [[WINDOW:action]] [[OPEN_APP:name]] [[TYPE:text]] [[CLICK:target]] [[LOG:text]]
 
 RULES:
-1. DO NOT use natural language like ""Typing: hello"". ONLY use [[TYPE:hello]].
-2. ALWAYS use [[LOG: explanation]] to tell the user what you are doing.
-3. Messengers: SEARCH first! Don't assume open chat is correct.
+1. For chat/greetings → just reply naturally, no commands
+2. For PC tasks → use commands, always [[LOG:explanation]] first
+3. Messengers: SEARCH first, don't assume open chat is correct
+4. Respond in the same language the user speaks
 
 {activeApp}|{memories}|{visualTextLog}
 ";
+            }
             var contents = new List<GeminiContent>();
 
             // 2. Конвертируем историю чата в формат Gemini
