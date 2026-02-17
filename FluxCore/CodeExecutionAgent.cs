@@ -69,28 +69,37 @@ namespace FluxCore
 
                 if (isDesktopQuery)
                 {
-                    sb.AppendLine($"=== DESKTOP CONTENTS (USE EXACT NAMES BELOW FOR MOVE_FILE) ===");
-                    
+                    sb.AppendLine($"=== DESKTOP CONTENTS ===");
+                    sb.AppendLine($"★★★ USE THESE EXACT FULL PATHS FOR MOVE_FILE! ★★★");
+                    sb.AppendLine();
+
                     // User Desktop
                     if (Directory.Exists(userDesktop))
                     {
                         var userDirs = Directory.GetDirectories(userDesktop);
                         var userFiles = Directory.GetFiles(userDesktop);
-                        sb.AppendLine($"--- User Desktop ({userDesktop}) ---");
-                        foreach (var d in userDirs.Take(20)) sb.AppendLine($"[DIR]  {Path.GetFileName(d)}");
-                        foreach (var f in userFiles.Take(50)) sb.AppendLine($"[FILE] {Path.GetFileName(f)}");
+                        sb.AppendLine($"--- User Desktop ---");
+                        foreach (var d in userDirs.Take(20)) sb.AppendLine($"[DIR]  {d}");
+                        foreach (var f in userFiles.Take(50)) sb.AppendLine($"[FILE] {f}");
                     }
-                    
+
                     // Public Desktop (shared shortcuts)
                     if (Directory.Exists(publicDesktop))
                     {
                         var pubDirs = Directory.GetDirectories(publicDesktop);
                         var pubFiles = Directory.GetFiles(publicDesktop);
-                        sb.AppendLine($"--- Public Desktop ({publicDesktop}) ---");
-                        foreach (var d in pubDirs.Take(20)) sb.AppendLine($"[DIR]  {Path.GetFileName(d)}");
-                        foreach (var f in pubFiles.Take(50)) sb.AppendLine($"[FILE] {Path.GetFileName(f)}");
+                        if (pubDirs.Length > 0 || pubFiles.Length > 0)
+                        {
+                            sb.AppendLine();
+                            sb.AppendLine($"--- Public Desktop (shared shortcuts) ---");
+                            foreach (var d in pubDirs.Take(20)) sb.AppendLine($"[DIR]  {d}");
+                            foreach (var f in pubFiles.Take(50)) sb.AppendLine($"[FILE] {f}");
+                        }
                     }
-                    
+
+                    sb.AppendLine();
+                    sb.AppendLine("TIP: Copy the FULL path from above when using MOVE_FILE.");
+
                     return new ExecutionResult(true, sb.ToString());
                 }
                 
@@ -183,7 +192,11 @@ namespace FluxCore
                 if (resolvedSource == null)
                 {
                     File.AppendAllText(debugPath, $"[MOVE] FAILED - Tried: {string.Join(", ", candidatePaths)}\n");
-                    return new ExecutionResult(false, $"Source file not found: {source}");
+                    // Provide detailed error showing what was actually tried
+                    var triedPaths = candidatePaths.Select(p => $"  - {p}").ToList();
+                    return new ExecutionResult(false,
+                        $"File not found. Tried these locations:\n{string.Join("\n", triedPaths)}\n" +
+                        $"TIP: Use LIST_FILES to get exact paths before moving.");
                 }
                 
                 source = resolvedSource;

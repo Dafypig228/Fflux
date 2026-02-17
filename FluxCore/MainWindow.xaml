@@ -95,16 +95,21 @@
         </Style>
     </Window.Resources>
 
-    <!-- Main container with blur effect -->
-    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#25FFFFFF" CornerRadius="10" Padding="10" MouseLeftButtonDown="OnDrag">
-        <Border.Background>
-            <SolidColorBrush x:Name="TintBrush" Color="#F0101015"/>
-        </Border.Background>
-        <Border.Effect>
-            <BlurEffect x:Name="BackgroundBlur" Radius="0"/>
-        </Border.Effect>
-
+    <!-- Main container - BLUR FIX: Separate background and content layers -->
+    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#25FFFFFF" CornerRadius="10" MouseLeftButtonDown="OnDrag">
         <Grid>
+            <!-- BACKGROUND LAYER - This gets blurred (behind content) -->
+            <Border x:Name="BlurredBackground" CornerRadius="10">
+                <Border.Background>
+                    <SolidColorBrush x:Name="TintBrush" Color="#F0101015"/>
+                </Border.Background>
+                <Border.Effect>
+                    <BlurEffect x:Name="BackgroundBlur" Radius="0"/>
+                </Border.Effect>
+            </Border>
+
+            <!-- CONTENT LAYER - Stays sharp (on top) -->
+            <Grid Margin="10">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -145,12 +150,33 @@
             <Border Grid.Row="1" Margin="0,8,0,4">
                 <StackPanel>
                     <TextBlock x:Name="StatusText" Text="Ready" Foreground="#50FFFFFF" FontSize="9" FontFamily="Consolas" HorizontalAlignment="Center"/>
-                    
+
                     <!-- TAB NAVIGATION -->
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,6,0,0">
                         <Button x:Name="TabChat" Content="💬 Chat" Style="{StaticResource TabBtn}" Click="Tab_Chat_Click" Foreground="#00FFD1"/>
                         <Button x:Name="TabMemory" Content="🧠 Memory" Style="{StaticResource TabBtn}" Click="Tab_Memory_Click"/>
                     </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- NEURO HUD PANEL - AI status display -->
+            <Border x:Name="NeuroHudPanel" Grid.Row="2" Visibility="Collapsed"
+                    Background="#15FFFFFF" CornerRadius="6" Padding="8" Margin="0,0,0,6">
+                <StackPanel>
+                    <DockPanel>
+                        <Ellipse x:Name="HudStateLight" Width="8" Height="8" Fill="#00FFD1" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="HudStateText" Text="READY" Foreground="#00FFD1" FontWeight="Bold" FontSize="10"/>
+                        <Border x:Name="HudValidationBadge" HorizontalAlignment="Right"
+                                Background="#2000FF00" CornerRadius="4" Padding="4,2" Visibility="Collapsed">
+                            <TextBlock Text="✓ VERIFIED" Foreground="#00FF00" FontSize="9"/>
+                        </Border>
+                    </DockPanel>
+                    <TextBlock x:Name="HudContentText" Text="" Foreground="#80FFFFFF" FontSize="9"
+                               TextWrapping="Wrap" Margin="14,4,0,0"/>
+                    <Border x:Name="HudActionBox" Background="#10FFFFFF" CornerRadius="4"
+                            Padding="6,4" Margin="0,4,0,0" Visibility="Collapsed">
+                        <TextBlock x:Name="HudActionText" Text="" Foreground="#FFDD00" FontSize="9"/>
+                    </Border>
                 </StackPanel>
             </Border>
 
@@ -282,12 +308,32 @@
                             <TextBlock Text="LOGS" Foreground="#00FFD1" FontWeight="Bold" FontSize="10" VerticalAlignment="Center"/>
                             <Button Content="✕" Click="Btn_CloseLogs_Click" HorizontalAlignment="Right" Style="{StaticResource CleanBtn}" Foreground="#FF5555"/>
                         </DockPanel>
-                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#999999" BorderThickness="0" 
+                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#999999" BorderThickness="0"
                                  TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="8" IsReadOnly="True" FontFamily="Consolas" FontSize="9"/>
                     </Grid>
                 </Border>
             </Grid>
 
+            <!-- PERMISSION OVERLAY -->
+            <Grid x:Name="PermissionOverlay" Grid.RowSpan="5" Visibility="Collapsed" Background="#F0050505">
+                <Border Background="#151520" BorderBrush="#40FFFFFF" BorderThickness="1" CornerRadius="8"
+                        Padding="16" Margin="20" VerticalAlignment="Center">
+                    <StackPanel>
+                        <TextBlock Text="⚠️ Permission Required" Foreground="#FFDD00" FontWeight="Bold" FontSize="12" Margin="0,0,0,10"/>
+                        <TextBlock x:Name="PermissionActionText" Text="" Foreground="White" FontSize="11" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="PermissionDetailsText" Text="" Foreground="#80FFFFFF" FontSize="10"
+                                   TextWrapping="Wrap" Margin="0,6,0,12"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <Button Content="✓ Allow" Click="Btn_PermissionAllow_Click"
+                                    Style="{StaticResource CleanBtn}" Background="#2000FF00" Margin="0,0,10,0" Padding="16,8"/>
+                            <Button Content="✕ Deny" Click="Btn_PermissionDeny_Click"
+                                    Style="{StaticResource CleanBtn}" Background="#20FF0000" Padding="16,8"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            </Grid>
         </Grid>
     </Border>
 </Window>

@@ -69,6 +69,19 @@ namespace FluxCore
         private IntPtr _targetWindow = IntPtr.Zero;
         private string _targetWindowTitle = "";
 
+        // LOCKED target - doesn't change during a task
+        private IntPtr _lockedTargetWindow = IntPtr.Zero;
+        private bool _useLockedTarget = false;
+
+        // DPI scaling factor
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("shcore.dll")]
+        private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
         // =========================================
         // TARGET WINDOW MANAGEMENT
         // =========================================
@@ -81,6 +94,78 @@ namespace FluxCore
             _targetWindow = GetForegroundWindow();
             _targetWindowTitle = GetWindowTitle(_targetWindow);
             System.Diagnostics.Debug.WriteLine($"[Automation] Captured target: {_targetWindowTitle}");
+        }
+
+        /// <summary>
+        /// LOCKS the target window for the duration of a task.
+        /// Call this at task start to prevent window switching issues.
+        /// </summary>
+        public void SetLockedTarget(IntPtr hwnd)
+        {
+            _lockedTargetWindow = hwnd;
+            _useLockedTarget = hwnd != IntPtr.Zero;
+            if (_useLockedTarget)
+            {
+                _targetWindow = hwnd;
+                _targetWindowTitle = GetWindowTitle(hwnd);
+                System.Diagnostics.Debug.WriteLine($"[Automation] LOCKED target: {_targetWindowTitle}");
+            }
+        }
+
+        /// <summary>
+        /// Unlocks the target window (call at task end).
+        /// </summary>
+        public void UnlockTarget()
+        {
+            _lockedTargetWindow = IntPtr.Zero;
+            _useLockedTarget = false;
+            System.Diagnostics.Debug.WriteLine($"[Automation] Target UNLOCKED");
+        }
+
+        /// <summary>
+        /// Gets the process name of the active window.
+        /// </summary>
+        public string GetActiveProcessName()
+        {
+            IntPtr hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return "";
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            try
+            {
+                return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// Checks if the current target is a console window.
+        /// </summary>
+        private bool IsConsoleWindow()
+        {
+            string procName = GetActiveProcessName().ToLower();
+            return procName.Contains("cmd") ||
+                   procName.Contains("powershell") ||
+                   procName.Contains("windowsterminal") ||
+                   procName.Contains("conhost") ||
+                   procName.Contains("pwsh");
+        }
+
+        /// <summary>
+        /// Gets DPI scale factor for the current monitor.
+        /// </summary>
+        private float GetDpiScale()
+        {
+            try
+            {
+                IntPtr monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+                GetDpiForMonitor(monitor, 0, out uint dpiX, out uint _);
+                return dpiX / 96f; // 96 is standard DPI
+            }
+            catch
+            {
+                return 1.0f; // Fallback to no scaling
+            }
         }
 
         /// <summary>
@@ -123,11 +208,28 @@ namespace FluxCore
 
         private AutomationElement? GetTargetRoot()
         {
-            // ALWAYS refresh to find a proper target window (not Flux)
+            // If we have a locked target, USE IT - don't search for another window
+            if (_useLockedTarget && _lockedTargetWindow != IntPtr.Zero)
+            {
+                _targetWindow = _lockedTargetWindow;
+                _targetWindowTitle = GetWindowTitle(_lockedTargetWindow);
+                System.Diagnostics.Debug.WriteLine($"[Automation] Using LOCKED target: {_targetWindowTitle}");
+
+                try
+                {
+                    return AutomationElement.FromHandle(_lockedTargetWindow);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            // Only refresh if not locked
             _targetWindow = IntPtr.Zero;
-            
+
             var candidates = new List<(IntPtr hWnd, string title)>();
-            
+
             EnumWindows((hWnd, lParam) =>
             {
                 if (!IsWindowVisible(hWnd)) return true;
@@ -143,25 +245,25 @@ namespace FluxCore
             var validWindows = candidates.Where(c =>
                 !c.title.Contains("FLUX", StringComparison.OrdinalIgnoreCase) &&
                 !c.title.Contains("Flux ai", StringComparison.OrdinalIgnoreCase) &&
+                !c.title.Contains("Fluxoria", StringComparison.OrdinalIgnoreCase) &&
                 !c.title.Contains("Program Manager") &&
                 !c.title.Contains("NVIDIA") &&
                 !c.title.Contains("Default IME") &&
                 !c.title.Contains("Microsoft Text Input") &&
                 c.title != "Settings").ToList();
 
-            // 3. Pick the top-most valid window (EnumWindows returns in Z-order)
-            // This ensures we target Chrome if it's open, or Notepad if it's open.
+            // Pick the top-most valid window (EnumWindows returns in Z-order)
             if (validWindows.Count > 0)
             {
                 var top = validWindows[0];
                 _targetWindow = top.hWnd;
                 _targetWindowTitle = top.title;
             }
-            
+
             System.Diagnostics.Debug.WriteLine($"[Automation] Target: {_targetWindowTitle} (from {validWindows.Count} candidates)");
-            
+
             if (_targetWindow == IntPtr.Zero) return null;
-            
+
             try
             {
                 return AutomationElement.FromHandle(_targetWindow);
@@ -257,88 +359,166 @@ namespace FluxCore
         // =========================================
         // ACTIONS
         // =========================================
-        
-        public async Task<AutomationResult> ClickElementAsync(string nameOrId)
+
+        // EnsureFocusAsync is defined below as a public method with multiple strategies
+
+        /// <summary>
+        /// Waits for an element to be visible and enabled.
+        /// </summary>
+        private async Task<UIElementInfo?> WaitForElementAsync(string nameOrId, int timeoutMs = 2000)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                var clickables = FindClickableElements();
+                var target = clickables.FirstOrDefault(e =>
+                    e.Name.Contains(nameOrId, StringComparison.OrdinalIgnoreCase) ||
+                    e.AutomationId.Contains(nameOrId, StringComparison.OrdinalIgnoreCase));
+
+                if (target != null)
+                {
+                    // Verify element is in valid position (not off-screen)
+                    if (target.X > 0 && target.Y > 0 && target.Width > 0 && target.Height > 0)
+                        return target;
+                }
+
+                await Task.Delay(100);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Performs a reliable click with retry and multiple strategies.
+        /// </summary>
+        public async Task<AutomationResult> ClickWithRetryAsync(string nameOrId, int maxRetries = 3)
+        {
+            AutomationResult? lastResult = null;
+
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                // Strategy changes based on attempt number
+                switch (attempt)
+                {
+                    case 0:
+                        // First try: normal click
+                        lastResult = await ClickElementInternalAsync(nameOrId, usePhysicalClick: false);
+                        break;
+                    case 1:
+                        // Second try: physical click with longer delays
+                        await Task.Delay(200);
+                        lastResult = await ClickElementInternalAsync(nameOrId, usePhysicalClick: true);
+                        break;
+                    case 2:
+                        // Third try: scroll to reveal element, then click
+                        await ScrollAsync("down");
+                        await Task.Delay(150);
+                        lastResult = await ClickElementInternalAsync(nameOrId, usePhysicalClick: true);
+                        break;
+                }
+
+                if (lastResult?.Success == true)
+                    return lastResult;
+
+                // Backoff delay between retries
+                await Task.Delay(100 * (attempt + 1));
+            }
+
+            return lastResult ?? new AutomationResult(false, $"Click failed after {maxRetries} attempts");
+        }
+
+        /// <summary>
+        /// Internal click implementation with strategy options.
+        /// </summary>
+        private async Task<AutomationResult> ClickElementInternalAsync(string nameOrId, bool usePhysicalClick)
         {
             try
             {
-                // Check if coordinate: "100,200" or "x:100, y:200"
+                // Ensure target window is focused first
+                IntPtr targetWindow = _useLockedTarget && _lockedTargetWindow != IntPtr.Zero
+                    ? _lockedTargetWindow
+                    : _targetWindow;
+
+                if (targetWindow != IntPtr.Zero)
+                {
+                    await EnsureFocusAsync(targetWindow);
+                }
+
+                // Check if coordinate: "100,200"
                 var coordMatch = System.Text.RegularExpressions.Regex.Match(nameOrId, @"(\d+)[, ]+(\d+)");
                 if (coordMatch.Success)
                 {
                     int x = int.Parse(coordMatch.Groups[1].Value);
                     int y = int.Parse(coordMatch.Groups[2].Value);
-                    
+
                     SetCursorPos(x, y);
-                    await Task.Delay(50);
+                    await Task.Delay(60);
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    await Task.Delay(50);
+                    await Task.Delay(40);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    
+
                     return new AutomationResult(true, $"Clicked at {x},{y}");
                 }
 
-                // Try to find target window by name if specified
-                if (nameOrId.Contains("Close", StringComparison.OrdinalIgnoreCase) ||
-                    nameOrId.Contains("File", StringComparison.OrdinalIgnoreCase))
-                {
-                    SetTargetWindowByTitle("Notepad");
-                }
+                // Wait for element to appear
+                var target = await WaitForElementAsync(nameOrId, timeoutMs: 1500);
 
-                var clickables = FindClickableElements();
-                var target = clickables.FirstOrDefault(e => 
-                    e.Name.Contains(nameOrId, StringComparison.OrdinalIgnoreCase) ||
-                    e.AutomationId.Contains(nameOrId, StringComparison.OrdinalIgnoreCase));
-
-                // FALLBACK: Search desktop icons if not found in current window
+                // Fallback: check desktop icons
                 if (target == null)
                 {
                     var desktopElements = FindDesktopIcons();
-                    target = desktopElements.FirstOrDefault(e => 
+                    target = desktopElements.FirstOrDefault(e =>
                         e.Name.Contains(nameOrId, StringComparison.OrdinalIgnoreCase));
-                    
-                    if (target != null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[Automation] Found on desktop: {target.Name}");
-                    }
                 }
 
                 if (target == null)
                 {
-                    string available = clickables.Count > 0 
-                        ? string.Join(", ", clickables.Take(8).Select(e => $"'{e.Name}'"))
-                        : "none found";
-                    return new AutomationResult(false, $"Element not found: '{nameOrId}'. Target: {_targetWindowTitle}. Available: {available}");
+                    var clickables = FindClickableElements();
+                    string available = clickables.Count > 0
+                        ? string.Join(", ", clickables.Take(5).Select(e => $"'{e.Name}'"))
+                        : "none";
+                    return new AutomationResult(false, $"Element not found: '{nameOrId}'. Available: {available}");
                 }
 
-                // Bring target window to front first
+                // Bring target window to front
                 if (_targetWindow != IntPtr.Zero)
                 {
                     SetForegroundWindow(_targetWindow);
-                    await Task.Delay(100);
+                    await Task.Delay(50);
                 }
 
-                // Try InvokePattern first
-                if (target.Element != null && target.Element.TryGetCurrentPattern(InvokePattern.Pattern, out object? pattern))
+                // Try InvokePattern first (unless forced physical click)
+                if (!usePhysicalClick && target.Element != null &&
+                    target.Element.TryGetCurrentPattern(InvokePattern.Pattern, out object? pattern))
                 {
                     ((InvokePattern)pattern).Invoke();
-                    return new AutomationResult(true, $"Clicked: {target.Name} ({target.Type})");
+                    return new AutomationResult(true, $"Clicked: {target.Name}");
                 }
 
-                // Fallback: physical mouse click
+                // Physical mouse click
                 int centerX = target.X + target.Width / 2;
                 int centerY = target.Y + target.Height / 2;
+
                 SetCursorPos(centerX, centerY);
                 await Task.Delay(50);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                await Task.Delay(40);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                
-                return new AutomationResult(true, $"Clicked at ({centerX}, {centerY}): {target.Name}");
+
+                return new AutomationResult(true, $"Clicked: {target.Name} at ({centerX},{centerY})");
             }
             catch (Exception ex)
             {
                 return new AutomationResult(false, $"Click failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Main click entry point - uses retry logic for reliability.
+        /// </summary>
+        public async Task<AutomationResult> ClickElementAsync(string nameOrId)
+        {
+            // Use the retry version for better reliability
+            return await ClickWithRetryAsync(nameOrId, maxRetries: 3);
         }
         
         /// <summary>
@@ -389,69 +569,283 @@ namespace FluxCore
         }
 
         /// <summary>
-        /// Types text into the target window. Just focuses and sends keyboard input.
+        /// Types text into the target window. Uses different methods for console vs GUI apps.
         /// </summary>
         public async Task<AutomationResult> TypeTextAsync(string fieldHint, string text)
         {
             try
             {
-                // USE CURRENT FOREGROUND WINDOW - don't search for a different one!
-                IntPtr foregroundWindow = GetForegroundWindow();
-                
-                if (foregroundWindow == IntPtr.Zero)
-                    return new AutomationResult(false, "No foreground window found.");
-                
-                // Get window title for logging
+                // Ensure target window is focused first
+                IntPtr targetWindow = _useLockedTarget && _lockedTargetWindow != IntPtr.Zero
+                    ? _lockedTargetWindow
+                    : GetForegroundWindow();
+
+                if (targetWindow == IntPtr.Zero)
+                    return new AutomationResult(false, "No target window found.");
+
+                // Focus the window
+                await EnsureFocusAsync(targetWindow);
+
+                // Get window info for logging
                 StringBuilder sb = new StringBuilder(256);
-                GetWindowText(foregroundWindow, sb, 256);
+                GetWindowText(targetWindow, sb, 256);
                 string windowTitle = sb.ToString();
-                
-                // Small delay to ensure window is ready
-                await Task.Delay(50);
-                
-                // For browsers, don't search for text areas - just paste into current focus
-                // The AI should have already clicked where it wants to type
-                
-                // Use clipboard paste - most reliable method
-                string? originalClip = null;
-                try
+
+                // Detect if this is a console window - use character-by-character for consoles
+                if (IsConsoleWindow())
                 {
-                    if (System.Windows.Clipboard.ContainsText())
-                        originalClip = System.Windows.Clipboard.GetText();
+                    System.Diagnostics.Debug.WriteLine($"[Automation] Console detected, using char-by-char typing");
+                    return await TypeToConsoleAsync(text, windowTitle);
                 }
-                catch { }
-                
-                // Set our text to clipboard (must be on STA thread)
-                System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                {
-                    System.Windows.Clipboard.SetText(text);
-                });
-                
-                await Task.Delay(30);
-                
-                // Press Ctrl+V
-                keybd_event(0x11, 0, 0, UIntPtr.Zero); // VK_CONTROL down
-                keybd_event(0x56, 0, 0, UIntPtr.Zero); // V down
-                keybd_event(0x56, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // V up
-                keybd_event(0x11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // VK_CONTROL up
-                
-                await Task.Delay(50);
-                
-                // Restore original clipboard (async, no wait)
-                if (originalClip != null)
-                {
-                    _ = Task.Run(() => System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                    {
-                        try { System.Windows.Clipboard.SetText(originalClip); } catch { }
-                    }));
-                }
-                
-                return new AutomationResult(true, $"Typed in {windowTitle}: {text}");
+
+                // For GUI apps, use clipboard paste (faster and more reliable)
+                return await TypeViaClipboardAsync(text, windowTitle);
             }
             catch (Exception ex)
             {
                 return new AutomationResult(false, $"Type failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Types text to console windows character by character.
+        /// Console windows don't handle Ctrl+V the same way GUI apps do.
+        /// </summary>
+        private async Task<AutomationResult> TypeToConsoleAsync(string text, string windowTitle)
+        {
+            try
+            {
+                foreach (char c in text)
+                {
+                    // Handle special characters
+                    if (c == '\n' || c == '\r')
+                    {
+                        keybd_event(0x0D, 0, 0, UIntPtr.Zero); // ENTER down
+                        keybd_event(0x0D, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // ENTER up
+                        await Task.Delay(50);
+                        continue;
+                    }
+
+                    if (c == '\t')
+                    {
+                        keybd_event(0x09, 0, 0, UIntPtr.Zero); // TAB down
+                        keybd_event(0x09, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // TAB up
+                        await Task.Delay(10);
+                        continue;
+                    }
+
+                    // Get virtual key code for the character
+                    short vkResult = VkKeyScan(c);
+                    if (vkResult == -1)
+                    {
+                        // Character not mappable, skip it
+                        System.Diagnostics.Debug.WriteLine($"[Automation] Cannot type character: {c}");
+                        continue;
+                    }
+
+                    byte vk = (byte)(vkResult & 0xFF);
+                    bool needShift = (vkResult & 0x100) != 0;
+                    bool needCtrl = (vkResult & 0x200) != 0;
+                    bool needAlt = (vkResult & 0x400) != 0;
+
+                    // Press modifiers
+                    if (needShift) keybd_event(0x10, 0, 0, UIntPtr.Zero);
+                    if (needCtrl) keybd_event(0x11, 0, 0, UIntPtr.Zero);
+                    if (needAlt) keybd_event(0x12, 0, 0, UIntPtr.Zero);
+
+                    // Press and release the key
+                    keybd_event(vk, 0, 0, UIntPtr.Zero);
+                    keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                    // Release modifiers
+                    if (needAlt) keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    if (needCtrl) keybd_event(0x11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    if (needShift) keybd_event(0x10, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                    await Task.Delay(15); // Small delay between characters
+                }
+
+                return new AutomationResult(true, $"Typed to console {windowTitle}: {text}");
+            }
+            catch (Exception ex)
+            {
+                return new AutomationResult(false, $"Console type failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Types text via clipboard paste (for GUI apps) with fallback to char-by-char.
+        /// </summary>
+        private async Task<AutomationResult> TypeViaClipboardAsync(string text, string windowTitle)
+        {
+            // Try clipboard method first (fastest)
+            bool clipboardSuccess = await TryClipboardPasteAsync(text);
+
+            if (clipboardSuccess)
+            {
+                return new AutomationResult(true, $"Typed in {windowTitle}: {text}");
+            }
+
+            // Fallback: character by character (slower but more reliable)
+            System.Diagnostics.Debug.WriteLine("[Automation] Clipboard failed, falling back to char-by-char");
+            return await TypeCharByCharAsync(text, windowTitle);
+        }
+
+        /// <summary>
+        /// Attempts to set clipboard and paste. Returns false if clipboard is locked.
+        /// </summary>
+        private async Task<bool> TryClipboardPasteAsync(string text)
+        {
+            int maxRetries = 3;
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    bool clipSet = false;
+
+                    // Try to set clipboard (may fail if locked by another app)
+                    System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        try
+                        {
+                            System.Windows.Clipboard.SetText(text);
+                            // Verify it was set correctly
+                            clipSet = System.Windows.Clipboard.GetText() == text;
+                        }
+                        catch
+                        {
+                            clipSet = false;
+                        }
+                    });
+
+                    if (!clipSet)
+                    {
+                        await Task.Delay(50 * (i + 1)); // Backoff
+                        continue;
+                    }
+
+                    await Task.Delay(30);
+
+                    // Press Ctrl+V
+                    keybd_event(0x11, 0, 0, UIntPtr.Zero); // VK_CONTROL down
+                    keybd_event(0x56, 0, 0, UIntPtr.Zero); // V down
+                    await Task.Delay(30);
+                    keybd_event(0x56, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // V up
+                    keybd_event(0x11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // VK_CONTROL up
+
+                    await Task.Delay(30);
+                    return true;
+                }
+                catch
+                {
+                    await Task.Delay(50 * (i + 1));
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Types text character by character using SendInput (fallback method).
+        /// </summary>
+        private async Task<AutomationResult> TypeCharByCharAsync(string text, string windowTitle)
+        {
+            try
+            {
+                foreach (char c in text)
+                {
+                    if (c == '\n' || c == '\r')
+                    {
+                        keybd_event(0x0D, 0, 0, UIntPtr.Zero);
+                        keybd_event(0x0D, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        await Task.Delay(30);
+                        continue;
+                    }
+
+                    if (c == '\t')
+                    {
+                        keybd_event(0x09, 0, 0, UIntPtr.Zero);
+                        keybd_event(0x09, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        await Task.Delay(10);
+                        continue;
+                    }
+
+                    short vkResult = VkKeyScan(c);
+                    if (vkResult == -1)
+                    {
+                        // Skip unmappable characters but log them
+                        System.Diagnostics.Debug.WriteLine($"[Automation] Skipping unmappable char: {c} (0x{((int)c):X4})");
+                        continue;
+                    }
+
+                    byte vk = (byte)(vkResult & 0xFF);
+                    bool needShift = (vkResult & 0x100) != 0;
+                    bool needCtrl = (vkResult & 0x200) != 0;
+                    bool needAlt = (vkResult & 0x400) != 0;
+
+                    if (needShift) keybd_event(0x10, 0, 0, UIntPtr.Zero);
+                    if (needCtrl) keybd_event(0x11, 0, 0, UIntPtr.Zero);
+                    if (needAlt) keybd_event(0x12, 0, 0, UIntPtr.Zero);
+
+                    keybd_event(vk, 0, 0, UIntPtr.Zero);
+                    keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                    if (needAlt) keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    if (needCtrl) keybd_event(0x11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    if (needShift) keybd_event(0x10, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                    await Task.Delay(10); // Faster than console typing
+                }
+
+                return new AutomationResult(true, $"Typed (char-by-char) in {windowTitle}: {text}");
+            }
+            catch (Exception ex)
+            {
+                return new AutomationResult(false, $"Char-by-char type failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Ensures the target window is focused. Uses multiple strategies if needed.
+        /// </summary>
+        public async Task EnsureFocusAsync(IntPtr targetWindow)
+        {
+            if (targetWindow == IntPtr.Zero) return;
+
+            IntPtr current = GetForegroundWindow();
+            if (current == targetWindow) return; // Already focused
+
+            // Strategy 1: Simple SetForegroundWindow
+            SetForegroundWindow(targetWindow);
+            await Task.Delay(100);
+
+            if (GetForegroundWindow() == targetWindow) return;
+
+            // Strategy 2: Restore if minimized, then focus
+            ShowWindow(targetWindow, SW_RESTORE);
+            await Task.Delay(50);
+            SetForegroundWindow(targetWindow);
+            await Task.Delay(100);
+
+            if (GetForegroundWindow() == targetWindow) return;
+
+            // Strategy 3: Alt key trick - Windows allows SetForegroundWindow after Alt press
+            keybd_event(0x12, 0, 0, UIntPtr.Zero); // Alt down
+            SetForegroundWindow(targetWindow);
+            keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); // Alt up
+            await Task.Delay(100);
+
+            if (GetForegroundWindow() == targetWindow) return;
+
+            // Strategy 4: Minimize and restore to force attention
+            ShowWindow(targetWindow, SW_MINIMIZE);
+            await Task.Delay(50);
+            ShowWindow(targetWindow, SW_RESTORE);
+            SetForegroundWindow(targetWindow);
+            await Task.Delay(150);
+
+            System.Diagnostics.Debug.WriteLine($"[Automation] Focus attempt complete. Current: {GetWindowTitle(GetForegroundWindow())}");
         }
 
         /// <summary>

@@ -30,6 +30,132 @@ namespace FluxCore
         private const int MAX_STEPS = 30; // Increased for complex tasks
         private static readonly string DebugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "FluxDebug.txt");
 
+        // SMART AUTO-DETECTION: Execution Mode
+        private bool _smartModeEnabled = true;
+        private bool _screenAccessGranted = false;
+        private Func<string, Task<bool>>? _requestScreenAccess; // Callback to ask user for screen permission
+
+        // Commands that can run in background (no screen needed)
+        private static readonly HashSet<string> BackgroundCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "POWERSHELL", "PS", "PYTHON", "RUN_PYTHON", "RUN_SHELL",
+            "LIST_FILES", "MOVE_FILE", "COPY_FILE", "DELETE_FILE", "RENAME_FILE",
+            "MAKE_DIR", "FILE_INFO", "READ_FILE", "WRITE_FILE",
+            "SEARCH_FILES", "FIND_FILE", "FIND",
+            "WAIT", "LOG"
+        };
+
+        // Commands that REQUIRE screen access
+        private static readonly HashSet<string> ScreenCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CLICK", "CLICKING", "TYPE", "TYPING", "KEYS", "SCROLL", "DRAG", "DRAGGING",
+            "OPEN_APP", "LAUNCHING", "OPENING", "WINDOW",
+            "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO",
+            "HIDE_SELF", "MINIMIZE_SELF"
+        };
+
+        /// <summary>
+        /// Check if a command can run in background without screen access.
+        /// </summary>
+        private bool IsBackgroundCommand(string cmdType)
+        {
+            return BackgroundCommands.Contains(cmdType.ToUpper());
+        }
+
+        /// <summary>
+        /// Check if a command requires screen access.
+        /// </summary>
+        private bool RequiresScreenAccess(string cmdType)
+        {
+            return ScreenCommands.Contains(cmdType.ToUpper());
+        }
+
+        /// <summary>
+        /// Enable/disable smart auto-detection mode.
+        /// </summary>
+        public void SetSmartMode(bool enabled)
+        {
+            _smartModeEnabled = enabled;
+            _logToUI($"[⚙️] Smart Mode: {(enabled ? "ENABLED" : "DISABLED")}");
+        }
+
+        /// <summary>
+        /// Set the callback for requesting screen access from user.
+        /// </summary>
+        public void SetScreenAccessCallback(Func<string, Task<bool>> callback)
+        {
+            _requestScreenAccess = callback;
+        }
+
+        /// <summary>
+        /// Request screen access from user if needed.
+        /// </summary>
+        private async Task<bool> RequestScreenAccessIfNeededAsync(string reason)
+        {
+            if (!_smartModeEnabled) return true; // Always allow if smart mode disabled
+            if (_screenAccessGranted) return true; // Already granted for this session
+
+            if (_requestScreenAccess != null)
+            {
+                _logToUI($"[🖥️] Requesting screen access: {reason}");
+                _screenAccessGranted = await _requestScreenAccess(reason);
+
+                if (_screenAccessGranted)
+                    _logToUI("[✓] Screen access granted");
+                else
+                    _logToUI("[✗] Screen access denied - will use background-only operations");
+
+                return _screenAccessGranted;
+            }
+
+            // No callback set, assume access granted
+            return true;
+        }
+
+        /// <summary>
+        /// Reset screen access for new task.
+        /// </summary>
+        public void ResetScreenAccess()
+        {
+            _screenAccessGranted = false;
+        }
+
+        /// <summary>
+        /// Predict if a task will likely need screen access based on keywords.
+        /// </summary>
+        private bool PredictScreenRequirement(string userRequest)
+        {
+            string lower = userRequest.ToLower();
+
+            // Keywords that suggest background-only tasks
+            string[] backgroundKeywords = new[]
+            {
+                "sort", "organize", "move file", "copy file", "delete file", "rename",
+                "list files", "find file", "search", "create folder", "make dir",
+                "run script", "execute", "powershell", "python",
+                "read file", "write file", "backup", "clean up",
+                "desktop", "documents", "downloads"
+            };
+
+            // Keywords that suggest screen interaction needed
+            string[] screenKeywords = new[]
+            {
+                "click", "type", "open app", "browse", "chrome", "browser",
+                "instagram", "telegram", "whatsapp", "website", "webpage",
+                "scroll", "drag", "window", "login", "sign in",
+                "watch", "play", "video", "youtube"
+            };
+
+            // Count matches
+            int backgroundScore = backgroundKeywords.Count(kw => lower.Contains(kw));
+            int screenScore = screenKeywords.Count(kw => lower.Contains(kw));
+
+            // If more screen keywords, likely needs screen
+            // If more background keywords, likely doesn't need screen
+            // If tied or unclear, assume screen needed (safer)
+            return screenScore >= backgroundScore;
+        }
+
         private void DebugLog(string message)
         {
             try
@@ -70,6 +196,9 @@ namespace FluxCore
         public event Action<string>? OnAction;
         public event Action<bool, string>? OnValidation; // success, reason
 
+        // CHAT RESPONSE EVENT - The actual AI response to show in chat
+        public event Action<string>? OnResponse;
+
         /// <summary>
         /// Main entry point. Executes a task with intelligent retry and recovery.
         /// </summary>
@@ -80,7 +209,22 @@ namespace FluxCore
             var successfulActions = new List<string>();
             var detailedLog = new StringBuilder();
             int noCommandCount = 0;
-            
+
+            // SMART MODE: Reset screen access for new task
+            ResetScreenAccess();
+
+            // SMART MODE: Analyze task to predict if screen is needed
+            bool taskLikelyNeedsScreen = PredictScreenRequirement(userRequest);
+            bool currentlyInBackgroundMode = _smartModeEnabled && !taskLikelyNeedsScreen;
+
+            if (_smartModeEnabled)
+            {
+                if (taskLikelyNeedsScreen)
+                    _logToUI("[🖥️] Task may require screen access - will request when needed");
+                else
+                    _logToUI("[⚡] Running in background mode - no screen needed");
+            }
+
             // BUILD CONVERSATION HISTORY within the task
             var conversationHistory = new List<ChatMessage>();
 
@@ -91,12 +235,12 @@ namespace FluxCore
                 _logToUI($"[🧠] Recalled {memories.Count} past lessons.");
                 foreach(var mem in memories) detailedLog.AppendLine($"[MEMORY]: {mem}");
             }
-            
+
             // Add the user's request as the first message
             conversationHistory.Add(new ChatMessage { Text = userRequest, IsUser = true });
-            
+
             _logToUI($"[🧠 FLUXORIA] Starting task: {userRequest}");
-            
+
             // Track which app we should be working in
             string targetApp = "";
             if (userRequest.ToLower().Contains("chrome") || userRequest.ToLower().Contains("instagram") ||
@@ -106,6 +250,25 @@ namespace FluxCore
                 targetApp = "telegram";
             else if (userRequest.ToLower().Contains("whatsapp"))
                 targetApp = "whatsapp";
+            else if (userRequest.ToLower().Contains("cmd") || userRequest.ToLower().Contains("command prompt"))
+                targetApp = "cmd";
+            else if (userRequest.ToLower().Contains("powershell") || userRequest.ToLower().Contains("terminal"))
+                targetApp = "powershell";
+            else if (userRequest.ToLower().Contains("notepad"))
+                targetApp = "notepad";
+
+            // LOCK the target window at task start to prevent switching issues
+            // SMART MODE: Only lock if we expect to need screen access
+            if (!string.IsNullOrEmpty(targetApp) && (taskLikelyNeedsScreen || !_smartModeEnabled))
+            {
+                // Try to find and lock the target window
+                var targetHwnd = FindWindowByName(targetApp);
+                if (targetHwnd != IntPtr.Zero)
+                {
+                    _automation.SetLockedTarget(targetHwnd);
+                    _logToUI($"[🔒] Locked target: {targetApp}");
+                }
+            }
 
             for (int iteration = 0; iteration < MAX_STEPS; iteration++)
             {
@@ -113,28 +276,40 @@ namespace FluxCore
                 _logger.Log($"STARTING STEP {iteration + 1}");
                 
                 OnStateChanged?.Invoke($"STEP {iteration + 1}");
-                await Task.Delay(500); // Breathe
+                // SPEED FIX: Removed 500ms breathe delay - unnecessary slowdown
 
                 // 1. Get current screen state SAFE
+                // SMART MODE: Skip screenshot if we're in background mode
                 string screenshot = "";
                 string activeWindow = "Unknown";
                 string clickableElements = "";
-                try
+
+                bool shouldCaptureScreen = !_smartModeEnabled || _screenAccessGranted || taskLikelyNeedsScreen;
+
+                if (shouldCaptureScreen)
                 {
-                    _logger.Log("Capturing Screenshot...");
-                    screenshot = _getScreenshot();
-                    _logger.Log("Screenshot Captured.");
-                    
-                    activeWindow = _getActiveWindow();
-                    // clickableElements = _cortex?.GetClickableElements() ?? ""; // DISABLED FOR STABILITY
-                    clickableElements = "";
-                    _logger.Log($"Context: {activeWindow}");
+                    try
+                    {
+                        _logger.Log("Capturing Screenshot...");
+                        screenshot = _getScreenshot();
+                        _logger.Log("Screenshot Captured.");
+
+                        activeWindow = _getActiveWindow();
+                        // clickableElements = _cortex?.GetClickableElements() ?? ""; // DISABLED FOR STABILITY
+                        clickableElements = "";
+                        _logger.Log($"Context: {activeWindow}");
+                    }
+                    catch (Exception ex)
+                    {
+                         _logToUI($"[⚠️] Sensory Error: {ex.Message}");
+                         _logger.Log($"SENSORY ERROR: {ex.Message}");
+                         detailedLog.AppendLine($"[ERROR]: Failed to get context: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                     _logToUI($"[⚠️] Sensory Error: {ex.Message}");
-                     _logger.Log($"SENSORY ERROR: {ex.Message}");
-                     detailedLog.AppendLine($"[ERROR]: Failed to get context: {ex.Message}");
+                    _logger.Log("Skipping screenshot (background mode)");
+                    detailedLog.AppendLine("[INFO]: Running in background mode - no screenshot");
                 }
                 
                 _logToUI($"[Step {iteration + 1}/{MAX_STEPS}] Thinking...");
@@ -142,7 +317,9 @@ namespace FluxCore
                 
                 // 2. Build context message (what the AI sees NOW)
                 _logger.Log("Building Context...");
-                string contextMessage = BuildContextMessage(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories);
+                // SMART MODE: Pass background mode state to context builder
+                bool currentBackgroundMode = _smartModeEnabled && !_screenAccessGranted && !taskLikelyNeedsScreen;
+                string contextMessage = BuildContextMessage(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories, currentBackgroundMode);
                 _logger.Log("Context Built.");
                 
                 // 3. Ask AI with FULL conversation history + current context
@@ -277,6 +454,50 @@ namespace FluxCore
                 {
                     var cmd = actionCommands[0];
                     string currentAction = $"{cmd.Type}:{cmd.Arg}";
+
+                    // SMART MODE: Check if this command requires screen access
+                    if (_smartModeEnabled && RequiresScreenAccess(cmd.Type) && !_screenAccessGranted)
+                    {
+                        string reason = $"Need to execute {cmd.Type} command (requires screen interaction)";
+                        bool granted = await RequestScreenAccessIfNeededAsync(reason);
+
+                        if (!granted)
+                        {
+                            // User denied screen access - try to suggest alternative
+                            _logToUI($"[⚠️] Screen access denied. Skipping {cmd.Type} - will try background alternatives.");
+                            failedAttempts.Add($"SKIPPED (no screen access): {currentAction}");
+                            conversationHistory.Add(new ChatMessage
+                            {
+                                Text = $"SCREEN ACCESS DENIED: Cannot execute {cmd.Type}. " +
+                                       "Please use background-capable commands only (POWERSHELL, PYTHON, LIST_FILES, MOVE_FILE, etc.)",
+                                IsUser = true
+                            });
+                            continue; // Skip this command and let AI try a different approach
+                        }
+
+                        // Screen access granted - capture fresh screenshot
+                        try
+                        {
+                            _logToUI("[📸] Capturing screen after access granted...");
+                            screenshot = _getScreenshot();
+                            activeWindow = _getActiveWindow();
+
+                            // Lock target window now that we have screen access
+                            if (!string.IsNullOrEmpty(targetApp))
+                            {
+                                var targetHwnd = FindWindowByName(targetApp);
+                                if (targetHwnd != IntPtr.Zero)
+                                {
+                                    _automation.SetLockedTarget(targetHwnd);
+                                    _logToUI($"[🔒] Locked target: {targetApp}");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logToUI($"[⚠️] Screenshot failed: {ex.Message}");
+                        }
+                    }
                     
                     // Before KEYS command, verify correct window
                     if (cmd.Type.ToUpper() == "KEYS" && !string.IsNullOrEmpty(targetApp))
@@ -316,67 +537,90 @@ namespace FluxCore
                     else
                         failedAttempts.Add($"FAILED: {currentAction} → {outcome.Message}");
                     
-                    // Wait for UI to update before taking new screenshot
-                    if (cmd.Type == "KEYS" && cmd.Arg.ToUpper().Contains("ENTER"))
-                        await Task.Delay(1500);
-                    else if (cmd.Type == "CLICK" || cmd.Type == "TYPE")
-                        await Task.Delay(300);
-                    else
-                        await Task.Delay(150);
+                    // SPEED FIX: Minimal delays - reduced by 60-85%
+                    int postActionDelay = cmd.Type.ToUpper() switch
+                    {
+                        "KEYS" when cmd.Arg.ToUpper().Contains("ENTER") => 300,  // was 2000
+                        "OPEN_APP" => 200,                                        // was 800
+                        "CLICK" => 100,                                           // was 500
+                        "TYPE" => 50,                                             // was 300
+                        "SCROLL" => 100,                                          // was 400
+                        _ => 50                                                   // was 200
+                    };
+                    // Only add extra delay for focus-related operations
+                    if (outcome.Message.Contains("Focused") || outcome.Message.Contains("Opened"))
+                        postActionDelay = Math.Max(postActionDelay, 150);
+
+                    await Task.Delay(postActionDelay);
                     
                     noCommandCount = 0;
 
-                    // 6. VISUAL VERIFICATION (NEW - Phase 3)
-                    // Only verify impactful actions that change screen state
-                    try
-                    {
-                        // Wait for UI to settle (especially for HIDE_SELF or app launch)
-                        await Task.Delay(1000); 
+                    // 6. VISUAL VERIFICATION - SPEED OPTIMIZED
+                    // Only verify CLICK commands that failed, or when specifically needed
+                    // This saves 3-5 seconds per action by skipping unnecessary validation
+                    bool shouldVerify = RequiresScreenAccess(cmd.Type) &&
+                                       (cmd.Type == "CLICK" && !outcome.Success);  // Only verify failed clicks
 
-                        string afterScreenshot = "";
-                        try 
+                    if (shouldVerify)
+                    {
+                        try
                         {
-                            afterScreenshot = _getScreenshot();
+                            // SPEED FIX: Reduced from 1000ms to 200ms
+                            await Task.Delay(200);
+
+                            string afterScreenshot = "";
+                            try
+                            {
+                                afterScreenshot = _getScreenshot();
+                            }
+                            catch (Exception ex)
+                            {
+                                _logToUI($"[⚠️] Screenshot failed: {ex.Message}");
+                            }
+
+                            // Validate if we have both screenshots
+                            if (!string.IsNullOrEmpty(screenshot) && !string.IsNullOrEmpty(afterScreenshot))
+                            {
+                                 _logToUI($"[👁️] Verifying action: {cmd.Type}");
+                                 OnStateChanged?.Invoke("VERIFYING");
+
+                                 var validation = await _validator.ValidateVisualAsync(currentAction, screenshot, afterScreenshot);
+
+                                 OnValidation?.Invoke(validation.Success, validation.Message);
+
+                                 if (!validation.Success)
+                                 {
+                                      _logToUI($"[⚠️] Visual check failed: {validation.Message}");
+                                      detailedLog.AppendLine($"[VALIDATOR]: Action might have failed! Reason: {validation.Message}");
+                                 }
+                            }
                         }
                         catch (Exception ex)
                         {
-                            _logToUI($"[⚠️] Screenshot failed: {ex.Message}");
-                        }
-
-                        // Validate if we have both screenshots
-                        if (!string.IsNullOrEmpty(screenshot) && !string.IsNullOrEmpty(afterScreenshot))
-                        {
-                             _logToUI($"[👁️] Verifying action: {cmd.Type}");
-                             OnStateChanged?.Invoke("VERIFYING");
-                             
-                             var validation = await _validator.ValidateVisualAsync(currentAction, screenshot, afterScreenshot);
-                             
-                             OnValidation?.Invoke(validation.Success, validation.Message);
-                             
-                             if (!validation.Success)
-                             {
-                                  _logToUI($"[⚠️] Visual check failed: {validation.Message}");
-                                  detailedLog.AppendLine($"[VALIDATOR]: Action might have failed! Reason: {validation.Message}");
-                             }
+                             _logToUI($"[⚠️] Validation error: {ex.Message}");
                         }
                     }
-                    catch (Exception ex)
-                    {
-                         _logToUI($"[⚠️] Validation error: {ex.Message}");
-                    }
+                    // SPEED FIX: Skip logging for background commands to reduce noise
 
                     // After TASK_COMPLETE with action, we're done
                     if (aiResponse.ToUpper().Contains("TASK_COMPLETE"))
                     {
                         log.AppendLine($"[✓] Task completed after {iteration + 1} steps");
-                        
+
+                        // CLEANUP: Unlock target window
+                        _automation.UnlockTarget();
+
                         // REFLEXION: Learn from this session
                         _logToUI("[🧠] Reflexing on task...");
                         await PerformReflexionAsync(userRequest, conversationHistory, true);
 
+                        // Generate natural response for chat
+                        string naturalResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, true);
+                        OnResponse?.Invoke(naturalResponse);
+
                         log.AppendLine("\n\n=== FULL DEBUG LOG ===");
                         log.Append(detailedLog.ToString());
-                        return log.ToString();
+                        return naturalResponse;
                     }
                     
                     // Loop continues - will take fresh screenshot and ask AI what to do next
@@ -384,7 +628,14 @@ namespace FluxCore
                 else
                 {
                     noCommandCount++;
-                    if (iteration == 0) return aiResponse;
+                    // First iteration with no commands = simple conversation
+                    if (iteration == 0)
+                    {
+                        // Extract just the conversational part (remove command markers)
+                        string conversationalResponse = ExtractConversationalResponse(aiResponse);
+                        OnResponse?.Invoke(conversationalResponse);
+                        return conversationalResponse;
+                    }
                     if (noCommandCount >= 3) break;
                     failedAttempts.Add("No action command found.");
                 }
@@ -393,7 +644,15 @@ namespace FluxCore
             log.AppendLine($"[!] Reached max steps ({MAX_STEPS})");
             log.AppendLine("\n\n=== DETAILED LOG FOR DEBUGGING ===");
             log.Append(detailedLog.ToString());
-            return log.ToString();
+
+            // CLEANUP: Unlock target window
+            _automation.UnlockTarget();
+
+            // Generate natural response even for incomplete tasks
+            string incompleteResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, false);
+            OnResponse?.Invoke(incompleteResponse);
+
+            return incompleteResponse;
         }
 
         /// <summary>
@@ -640,14 +899,44 @@ namespace FluxCore
             }
         }
 
-        private string BuildContextMessage(string originalGoal, List<string> failures, List<string> successes, string activeWindow, int step, string clickableElements, List<string> memories)
+        private string BuildContextMessage(string originalGoal, List<string> failures, List<string> successes, string activeWindow, int step, string clickableElements, List<string> memories, bool inBackgroundMode = false)
         {
             var sb = new StringBuilder();
             
-            sb.AppendLine("You are Fluxoria, an AI that controls this Windows PC.");
-            sb.AppendLine("You can SEE the screen. Look at it and decide what to do.");
+            sb.AppendLine("You are Fluxoria, an AI assistant that can control this Windows PC.");
+            sb.AppendLine();
+
+            // CRITICAL: Handle conversation vs action
+            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("HOW TO RESPOND:");
+            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("1. FOR GREETINGS/CHAT (hi, hello, привет, how are you, etc.):");
+            sb.AppendLine("   → Just respond naturally with text. NO COMMANDS NEEDED.");
+            sb.AppendLine("   → Example: User says 'привет' → You respond: 'Привет! Как могу помочь?'");
+            sb.AppendLine("   → DO NOT use CLICK, TYPE, or any other command for conversation!");
+            sb.AppendLine();
+            sb.AppendLine("2. FOR TASKS (open something, click, move files, etc.):");
+            sb.AppendLine("   → Use commands like [[CLICK:button]], [[OPEN_APP:notepad]]");
+            sb.AppendLine("   → End with TASK_COMPLETE when done");
+            sb.AppendLine();
+            sb.AppendLine("IMPORTANT: If the user just wants to talk, RESPOND WITH TEXT ONLY.");
+            sb.AppendLine("Commands are ONLY for controlling the PC, not for chatting.");
+            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine();
+
+            // SMART MODE: Inform AI about current execution mode
+            if (inBackgroundMode)
+            {
+                sb.AppendLine("⚡ RUNNING IN BACKGROUND MODE - No screen access.");
+                sb.AppendLine("Use ONLY background commands: POWERSHELL, PYTHON, LIST_FILES, etc.");
+            }
+            else
+            {
+                sb.AppendLine("You can SEE the screen and control it.");
+            }
+
             // Add Goal
-            sb.AppendLine($"GOAL: {originalGoal}");
+            sb.AppendLine($"USER REQUEST: {originalGoal}");
             
             // Add Memories
             if (memories != null && memories.Any())
@@ -691,6 +980,13 @@ namespace FluxCore
             sb.AppendLine();
             sb.AppendLine("NEVER say 'I cannot'. You have a full OS at your command.");
             sb.AppendLine("Errors are feedback. Try a different approach.");
+            sb.AppendLine();
+            sb.AppendLine("★★★ FILE OPERATIONS RULES ★★★");
+            sb.AppendLine("1. ALWAYS use LIST_FILES first to see exact filenames and paths");
+            sb.AppendLine("2. Use the EXACT FULL PATH from LIST_FILES output for MOVE_FILE");
+            sb.AppendLine("3. Desktop files may be at OneDrive\\Desktop or Public\\Desktop");
+            sb.AppendLine("4. Shortcut files end in .lnk - include the extension!");
+            sb.AppendLine("5. Do NOT guess paths from screenshots - use LIST_FILES output");
             sb.AppendLine();
             sb.AppendLine($"ACTIVE WINDOW: {activeWindow} | Step: {step + 1}/30");
             
@@ -792,7 +1088,69 @@ namespace FluxCore
             if (cmdArg.ToLower().Contains("instagram")) return "chrome";
             if (cmdArg.ToLower().Contains("telegram")) return "telegram";
             if (cmdArg.ToLower().Contains("notepad")) return "notepad";
+            if (cmdArg.ToLower().Contains("cmd") || cmdArg.ToLower().Contains("command")) return "cmd";
+            if (cmdArg.ToLower().Contains("powershell")) return "powershell";
             return "chrome"; // default
+        }
+
+        // P/Invoke for window finding
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        /// <summary>
+        /// Finds a window by partial name match.
+        /// </summary>
+        private IntPtr FindWindowByName(string partialName)
+        {
+            IntPtr found = IntPtr.Zero;
+            var sb = new System.Text.StringBuilder(256);
+
+            EnumWindows((hWnd, lParam) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+
+                GetWindowText(hWnd, sb, 256);
+                string title = sb.ToString();
+
+                // Skip our own window
+                if (title.Contains("FLUX", StringComparison.OrdinalIgnoreCase) ||
+                    title.Contains("Fluxoria", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                // Match by process name patterns
+                bool isMatch = partialName.ToLower() switch
+                {
+                    "chrome" => title.Contains("Chrome", StringComparison.OrdinalIgnoreCase) ||
+                                title.Contains("Google", StringComparison.OrdinalIgnoreCase),
+                    "telegram" => title.Contains("Telegram", StringComparison.OrdinalIgnoreCase),
+                    "whatsapp" => title.Contains("WhatsApp", StringComparison.OrdinalIgnoreCase),
+                    "cmd" => title.Contains("Command Prompt", StringComparison.OrdinalIgnoreCase) ||
+                             title.Contains("cmd.exe", StringComparison.OrdinalIgnoreCase),
+                    "powershell" => title.Contains("PowerShell", StringComparison.OrdinalIgnoreCase) ||
+                                    title.Contains("pwsh", StringComparison.OrdinalIgnoreCase) ||
+                                    title.Contains("Windows Terminal", StringComparison.OrdinalIgnoreCase),
+                    "notepad" => title.Contains("Notepad", StringComparison.OrdinalIgnoreCase),
+                    _ => title.Contains(partialName, StringComparison.OrdinalIgnoreCase)
+                };
+
+                if (isMatch)
+                {
+                    found = hWnd;
+                    return false; // Stop enumeration
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            return found;
         }
 
         private string CleanResponse(string response)
@@ -837,6 +1195,118 @@ namespace FluxCore
             {
                 _logToUI($"[⚠️] Failed to reflect: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Generates a natural language response for the chat instead of raw logs.
+        /// </summary>
+        private string GenerateNaturalResponse(string userRequest, List<string> successes, List<string> failures, bool completed)
+        {
+            var sb = new StringBuilder();
+
+            if (completed && failures.Count == 0)
+            {
+                // Full success
+                sb.Append("Done! ");
+                if (successes.Count == 1)
+                {
+                    // Single action - describe it naturally
+                    string action = successes[0].Replace("✓ ", "");
+                    sb.Append(DescribeActionNaturally(action));
+                }
+                else if (successes.Count > 1)
+                {
+                    // Multiple actions
+                    sb.Append($"I completed {successes.Count} actions.");
+                }
+            }
+            else if (completed && failures.Count > 0)
+            {
+                // Partial success
+                sb.Append($"Finished with some issues. ");
+                if (successes.Count > 0)
+                    sb.Append($"Completed {successes.Count} actions. ");
+                sb.Append($"{failures.Count} actions had problems.");
+            }
+            else
+            {
+                // Not completed
+                if (successes.Count > 0)
+                    sb.Append($"Made progress ({successes.Count} actions done) but couldn't finish. ");
+                else
+                    sb.Append("I couldn't complete this task. ");
+
+                if (failures.Count > 0)
+                {
+                    // Show last failure reason
+                    string lastFail = failures.Last();
+                    if (lastFail.Contains("not found"))
+                        sb.Append("Couldn't find the element I was looking for.");
+                    else if (lastFail.Contains("focus") || lastFail.Contains("window"))
+                        sb.Append("Had trouble with window focus.");
+                    else
+                        sb.Append("Ran into some issues along the way.");
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Converts action notation to natural language.
+        /// </summary>
+        private string DescribeActionNaturally(string action)
+        {
+            // Parse action like "CLICK:Button" or "TYPE:hello"
+            var parts = action.Split(':');
+            if (parts.Length < 2) return action;
+
+            string cmd = parts[0].Trim().ToUpper();
+            string arg = parts[1].Trim();
+
+            return cmd switch
+            {
+                "CLICK" => $"Clicked on '{arg}'.",
+                "TYPE" => $"Typed the text.",
+                "KEYS" => $"Pressed {arg}.",
+                "OPEN_APP" => $"Opened {arg}.",
+                "SCROLL" => $"Scrolled {arg}.",
+                "MOVE_FILE" => $"Moved the file.",
+                "LIST_FILES" => $"Listed the files.",
+                "POWERSHELL" or "PS" => $"Ran the command.",
+                "PYTHON" => $"Ran Python code.",
+                _ => $"Did {cmd.ToLower()}."
+            };
+        }
+
+        /// <summary>
+        /// Extracts conversational response from AI output (removes command markers).
+        /// </summary>
+        private string ExtractConversationalResponse(string aiResponse)
+        {
+            // If it's a pure conversation (no commands), clean it up
+            string response = aiResponse;
+
+            // Remove THOUGHT: prefix if present
+            if (response.Contains("THOUGHT:"))
+            {
+                int start = response.IndexOf("THOUGHT:") + 8;
+                int end = response.IndexOf("ACTION:", start);
+                if (end == -1) end = response.Length;
+                response = response.Substring(start, end - start).Trim();
+            }
+
+            // Remove any remaining [[COMMAND:...]] patterns
+            response = System.Text.RegularExpressions.Regex.Replace(response, @"\[\[[^\]]+\]\]", "");
+
+            // Remove TASK_COMPLETE markers
+            response = response.Replace("TASK_COMPLETE", "").Replace("ACTION:", "").Trim();
+
+            // If response is empty or too short, provide default
+            if (string.IsNullOrWhiteSpace(response) || response.Length < 3)
+                response = "I'm here. What would you like me to do?";
+
+            return response;
         }
     }
 

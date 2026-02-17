@@ -258,6 +258,20 @@ namespace FluxCore
                 _jarvis.OnAction += (action) => Dispatcher.InvokeAsync(() => UpdateHudAction(action));
                 _jarvis.OnValidation += (success, reason) => Dispatcher.InvokeAsync(() => UpdateHudValidation(success, reason));
 
+                // --- CHAT RESPONSE WIRING ---
+                // This shows the AI's actual response in the chat (not just thoughts/actions)
+                _jarvis.OnResponse += (response) => Dispatcher.InvokeAsync(() =>
+                {
+                    AddMessage(response, false);  // false = AI message
+                    NeuroHudPanel.Visibility = Visibility.Collapsed;  // Hide HUD after response
+                    StatusText.Visibility = Visibility.Visible;
+                    StatusText.Text = "Ready";
+                    ScrollToBottom();
+                });
+
+                // --- SMART MODE: Screen Access Callback ---
+                _jarvis.SetScreenAccessCallback(RequestScreenAccessAsync);
+
                 _bgTimer = new System.Windows.Threading.DispatcherTimer();
                 _bgTimer.Tick += BackgroundMonitor_Tick;
                 _bgTimer.Interval = TimeSpan.FromMilliseconds(500);
@@ -1008,7 +1022,12 @@ Look at screen and continue.";
         private void SliderOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (!IsLoaded) return;
-            this.Opacity = SliderOpacity.Value;
+
+            // OPACITY FIX: Change background alpha instead of window opacity
+            // Window opacity doesn't work well with AllowsTransparency="True"
+            byte alpha = (byte)(SliderOpacity.Value * 255);
+            TintBrush.Color = Color.FromArgb(alpha, 16, 16, 21);
+
             _settings.WindowOpacity = SliderOpacity.Value;
             _settings.Save();
         }
@@ -1078,23 +1097,62 @@ Look at screen and continue.";
                 catch { }
             }
         }
+
+        private void ApplyColors()
+        {
+            // Apply theme colors from settings
+            // Currently using default cyan accent color
+            try
+            {
+                // Default neon colors are already set in XAML
+                // This method exists for future theming support
+            }
+            catch { }
+        }
         
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); _ = _executor?.DisposeAsync(); }
 
         // =========================================
         // PERMISSION DIALOG SYSTEM
         // =========================================
-        
+
+        // Screen Access Permission (for Smart Mode)
+        private TaskCompletionSource<bool>? _screenAccessResult;
+
         private void Btn_PermissionAllow_Click(object sender, RoutedEventArgs e)
         {
             PermissionOverlay.Visibility = Visibility.Collapsed;
             _permissionResult?.TrySetResult(true);
+            _screenAccessResult?.TrySetResult(true);
         }
 
         private void Btn_PermissionDeny_Click(object sender, RoutedEventArgs e)
         {
             PermissionOverlay.Visibility = Visibility.Collapsed;
             _permissionResult?.TrySetResult(false);
+            _screenAccessResult?.TrySetResult(false);
+        }
+
+        /// <summary>
+        /// Shows screen access permission dialog for Smart Mode.
+        /// Called when AI needs to use screen-based commands.
+        /// </summary>
+        private async Task<bool> RequestScreenAccessAsync(string reason)
+        {
+            _screenAccessResult = new TaskCompletionSource<bool>();
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                PermissionActionText.Text = "🖥️ Screen Access Required:";
+                PermissionDetailsText.Text = $"{reason}\n\nAllow Flux to view and interact with your screen?";
+                PermissionOverlay.Visibility = Visibility.Visible;
+
+                // Make window visible if hidden
+                if (this.Opacity < 0.5)
+                    this.Opacity = 1;
+            });
+
+            return await _screenAccessResult.Task;
         }
 
         /// <summary>
