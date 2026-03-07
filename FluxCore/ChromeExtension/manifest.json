@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Davos Bridge",
+  "version": "1.0",
+  "description": "Sends page context to Davos AI companion",
+  "permissions": [],
+  "host_permissions": [
+    "http://localhost:27834/*",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

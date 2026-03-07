@@ -97,13 +97,24 @@ namespace FluxCore
                     {
                         g.CopyFromScreen(System.Drawing.Point.Empty, System.Drawing.Point.Empty, bounds.Size);
                     }
-                    using (var ms = new MemoryStream())
+                    // Resize to 50% for faster Gemini processing (original coords still valid — AI sees proportional layout)
+                    int halfW = bounds.Width / 2;
+                    int halfH = bounds.Height / 2;
+                    using (var resized = new Bitmap(halfW, halfH))
                     {
-                        var encoder = GetEncoder(System.Drawing.Imaging.ImageFormat.Jpeg);
-                        var encoderParams = new System.Drawing.Imaging.EncoderParameters(1);
-                        encoderParams.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 60L);
-                        bitmap.Save(ms, encoder, encoderParams);
-                        return Convert.ToBase64String(ms.ToArray());
+                        using (var g2 = Graphics.FromImage(resized))
+                        {
+                            g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                            g2.DrawImage(bitmap, 0, 0, halfW, halfH);
+                        }
+                        using (var ms = new MemoryStream())
+                        {
+                            var encoder = GetEncoder(System.Drawing.Imaging.ImageFormat.Jpeg);
+                            var encoderParams = new System.Drawing.Imaging.EncoderParameters(1);
+                            encoderParams.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 50L);
+                            resized.Save(ms, encoder, encoderParams);
+                            return Convert.ToBase64String(ms.ToArray());
+                        }
                     }
                 }
             }
@@ -181,15 +192,19 @@ namespace FluxCore
             try
             {
                 var sb = new StringBuilder();
-                sb.AppendLine("=== CLICKABLE ELEMENTS (Name → X,Y coordinates) ===");
+                sb.AppendLine("=== VISIBLE UI ELEMENTS ===");
                 
                 IntPtr hwnd = GetForegroundWindow();
                 if (hwnd == IntPtr.Zero) return "No active window";
                 
                 var rootElement = AutomationElement.FromHandle(hwnd);
                 if (rootElement == null) return "Cannot access window";
+
+                // Check if this is a browser (Chrome with accessibility exposes web page elements)
+                string windowName = rootElement.Current.Name ?? "";
+                bool isBrowser = windowName.Contains("Chrome") || windowName.Contains("Edge") || windowName.Contains("Firefox");
+                int effectiveMax = isBrowser ? 50 : maxElements; // More elements for web pages
                 
-                // Find all clickable elements: buttons, links, edit boxes, etc.
                 var condition = new OrCondition(
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
@@ -200,52 +215,109 @@ namespace FluxCore
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image)
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image),
+                    // Web page elements (Chrome with --force-renderer-accessibility)
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.DataItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Custom)
                 );
                 
                 var elements = rootElement.FindAll(TreeScope.Descendants, condition);
-                int count = 0;
+                
+                // Collect all elements with their parent info
+                var collected = new List<(string name, string type, string parent, int x, int y)>();
                 
                 foreach (AutomationElement elem in elements)
                 {
-                    if (count >= maxElements) break;
+                    if (collected.Count >= effectiveMax * 2) break;
                     
                     try
                     {
                         var rect = elem.Current.BoundingRectangle;
-                        
-                        // Skip elements with no size or off-screen
                         if (rect.IsEmpty || rect.Width <= 0 || rect.Height <= 0) continue;
                         if (rect.X < 0 || rect.Y < 0) continue;
+                        // Filter tiny invisible elements (web page artifacts)
+                        if (rect.Width < 10 || rect.Height < 10) continue;
                         
-                        // Get center coordinates
                         int centerX = (int)(rect.X + rect.Width / 2);
                         int centerY = (int)(rect.Y + rect.Height / 2);
                         
                         string name = elem.Current.Name;
                         string type = elem.Current.LocalizedControlType;
                         
-                        // Skip empty names for certain types
                         if (string.IsNullOrWhiteSpace(name) && type != "edit") continue;
                         
-                        // Format: "Button 'Send' → 1234,567"
+                        // Get parent element name for context
+                        string parentName = "";
+                        try
+                        {
+                            var parent = TreeWalker.ControlViewWalker.GetParent(elem);
+                            if (parent != null && !string.IsNullOrWhiteSpace(parent.Current.Name))
+                                parentName = parent.Current.Name;
+                            else if (parent != null)
+                            {
+                                // Try grandparent
+                                var gp = TreeWalker.ControlViewWalker.GetParent(parent);
+                                if (gp != null && !string.IsNullOrWhiteSpace(gp.Current.Name))
+                                    parentName = gp.Current.Name;
+                            }
+                        }
+                        catch { }
+                        
                         string displayName = string.IsNullOrWhiteSpace(name) ? $"({type})" : name;
                         if (displayName.Length > 40) displayName = displayName.Substring(0, 37) + "...";
                         
-                        sb.AppendLine($"  [{type}] \"{displayName}\" → {centerX},{centerY}");
-                        count++;
+                        // Truncate parent name too (WhatsApp previews can be 500+ chars)
+                        if (parentName.Length > 40) parentName = parentName.Substring(0, 37) + "...";
+                        
+                        collected.Add((displayName, type, parentName, centerX, centerY));
                     }
-                    catch { /* Skip problematic elements */ }
+                    catch { }
+                }
+                
+                // DEDUP: Remove elements at the same coordinates (link + image icon at same spot)
+                var deduped = new List<(string name, string type, string parent, int x, int y)>();
+                var seenCoords = new HashSet<string>();
+                foreach (var el in collected)
+                {
+                    // Round to 10px grid to catch near-duplicates (5px was too small: 494/5≠496/5)
+                    string coordKey = $"{el.x / 10},{el.y / 10}";
+                    if (seenCoords.Contains(coordKey))
+                    {
+                        // Skip image duplicates — keep the more useful type (link/button)
+                        if (el.type == "изображение" || el.type == "image") continue;
+                        // If already have this coord but new one is more useful, replace
+                        int existingIdx = deduped.FindIndex(d => $"{d.x / 10},{d.y / 10}" == coordKey);
+                        if (existingIdx >= 0 && (el.type == "кнопка" || el.type == "ссылка" || el.type == "button" || el.type == "link"))
+                        {
+                            deduped[existingIdx] = el;
+                        }
+                        continue;
+                    }
+                    seenCoords.Add(coordKey);
+                    deduped.Add(el);
+                }
+                
+                int count = 0;
+                foreach (var el in deduped)
+                {
+                    if (count >= effectiveMax) break;
+
+                    string parentInfo = !string.IsNullOrEmpty(el.parent) ? $" in:{el.parent}" : "";
+                    // Coords divided by 2 to match 50%-scaled screenshot space
+                    sb.AppendLine($"  [{count + 1}] {el.type} \"{el.name}\"{parentInfo} → {el.x / 2},{el.y / 2}");
+                    count++;
                 }
                 
                 if (count == 0)
                 {
-                    sb.AppendLine("  (No clickable elements found - may be a web page, use Tab/Enter instead)");
+                    sb.AppendLine("  (No elements found — use coordinates from screenshot)");
                 }
                 else
                 {
-                    sb.AppendLine($"\nTo click an element, use: [[CLICK:x,y]]");
-                    sb.AppendLine($"Example: [[CLICK:1234,567]]");
+                    sb.AppendLine($"\n⚠ Use [[CLICK:x,y]] coordinates from this list.");
                 }
                 
                 return sb.ToString();
@@ -348,13 +420,77 @@ namespace FluxCore
         {
              IntPtr hwnd = GetForegroundWindow();
              if (hwnd == IntPtr.Zero) return "";
-             
+
              GetWindowThreadProcessId(hwnd, out uint pid);
-             try 
+             try
              {
-                 return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; 
+                 return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
              }
              catch { return ""; }
+        }
+
+        // ===== 4. APP FOCUS TIMELINE =====
+        private record FocusEvent(string App, DateTime Start, DateTime End);
+        private readonly List<FocusEvent> _focusEvents = new();
+        private string _currentFocusApp = "";
+        private DateTime _currentFocusStart = DateTime.Now;
+        private System.Threading.Timer? _focusTimer;
+
+        public void StartFocusTracking()
+        {
+            _currentFocusApp   = GetActiveWindow();
+            _currentFocusStart = DateTime.Now;
+            _focusTimer = new System.Threading.Timer(_ => PollFocus(), null,
+                TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        }
+
+        private void PollFocus()
+        {
+            try
+            {
+                string current = GetActiveWindow();
+                if (current == _currentFocusApp) return;
+
+                var completed = new FocusEvent(_currentFocusApp, _currentFocusStart, DateTime.Now);
+                lock (_focusEvents)
+                {
+                    _focusEvents.Add(completed);
+                    // Keep 4 hours of history max
+                    var cutoff = DateTime.Now.AddHours(-4);
+                    _focusEvents.RemoveAll(e => e.End < cutoff);
+                }
+
+                _currentFocusApp   = current;
+                _currentFocusStart = DateTime.Now;
+            }
+            catch { }
+        }
+
+        /// <summary>Returns a compact timeline of recent app usage.</summary>
+        public string GetFocusTimeline(int minutes = 60)
+        {
+            var since = DateTime.Now.AddMinutes(-minutes);
+            List<FocusEvent> snapshot;
+            lock (_focusEvents)
+                snapshot = _focusEvents.Where(e => e.End >= since).ToList();
+
+            if (snapshot.Count == 0 && string.IsNullOrEmpty(_currentFocusApp)) return "";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"=== APP FOCUS (last {minutes}min) ===");
+            foreach (var e in snapshot)
+            {
+                int secs = (int)(e.End - e.Start).TotalSeconds;
+                if (secs < 5) continue; // Skip accidental focus flashes
+                sb.AppendLine($"  {e.Start:HH:mm}-{e.End:HH:mm} ({secs}s) — {e.App}");
+            }
+            // Append currently active app
+            if (!string.IsNullOrEmpty(_currentFocusApp))
+            {
+                int secs = (int)(DateTime.Now - _currentFocusStart).TotalSeconds;
+                sb.AppendLine($"  {_currentFocusStart:HH:mm}-now  ({secs}s) — {_currentFocusApp} [active]");
+            }
+            return sb.ToString();
         }
     }
 }
