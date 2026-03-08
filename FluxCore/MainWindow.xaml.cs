@@ -170,7 +170,6 @@ namespace FluxCore
 
 
             LoadSession();
-            SaveSession();
             LoadConfig();
             InitializeServices();
             ApplyColors();
@@ -281,17 +280,9 @@ namespace FluxCore
                 _jarvis.KnowledgeGraph = _knowledgeGraph;
 
                 // Telegram (Phase F2) — opt-in via settings
-                if (_settings.TelegramEnabled
-                    && _settings.TelegramApiId > 0
-                    && !string.IsNullOrEmpty(_settings.TelegramApiHash))
-                {
-                    _telegram            = new TelegramService(_settings.TelegramApiId, _settings.TelegramApiHash);
-                    _telegram.DataLake   = _dataLake;
-                    _telegram.Memory     = _memory;
-                    _jarvis.Telegram     = _telegram;
-                    _ = Task.Run(() => _telegram.StartAsync()); // non-blocking auth + connect
-                    System.Diagnostics.Debug.WriteLine("[INIT] TelegramService starting...");
-                }
+                // InitializeTelegram() handles create → wire → StartAsync → UpdateStatus
+                InitializeTelegram();
+                System.Diagnostics.Debug.WriteLine("[INIT] TelegramService starting...");
 
                 // Register clipboard listener on main HWND
                 if (!_isSecondary)
@@ -326,6 +317,7 @@ namespace FluxCore
                 // FLUXBRAIN: Central Intelligence Router
                 // ============================================
                 _brain = new FluxBrain(llm, _jarvis, _memory, _hippocampus, _cortex);
+                _brain.DataLake = _dataLake; // Wire DataLake for task persistence and chat context
                 _coreMemory = new CoreMemoryService(llm);
                 _brain.SetCoreMemory(_coreMemory);
 

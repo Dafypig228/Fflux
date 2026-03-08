@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 using FluxCore.Swarm.Agents;
 using FluxCore.Swarm.Environment;
 using FluxCore.Swarm.Infrastructure;
@@ -54,7 +55,7 @@ namespace FluxCore.Swarm
         private readonly DependencyGraph _dependencyGraph;
         private readonly DynamicAgentPool _agentPool;
         private readonly ConflictResolver _conflictResolver;
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
         private readonly SwarmConfig _config;
         private readonly Action<string>? _logToUI;
 
@@ -76,20 +77,20 @@ namespace FluxCore.Swarm
             IMessageBus messageBus,
             IAgentRegistry registry,
             IFileLockManager lockManager,
-            GeminiService gemini,
+            ILLMService llm,
             SwarmConfig? config = null,
             Action<string>? logToUI = null)
         {
             _messageBus = messageBus;
             _registry = registry;
             _lockManager = lockManager;
-            _gemini = gemini;
+            _llm = llm;
             _config = config ?? new SwarmConfig();
             _logToUI = logToUI;
 
-            _decomposer = new TaskDecomposer(gemini, logToUI);
+            _decomposer = new TaskDecomposer(llm, logToUI);
             _dependencyGraph = new DependencyGraph(logToUI);
-            _agentPool = new DynamicAgentPool(messageBus, registry, lockManager, gemini, _config.AgentPoolConfig, logToUI);
+            _agentPool = new DynamicAgentPool(messageBus, registry, lockManager, llm, _config.AgentPoolConfig, logToUI);
             _conflictResolver = new ConflictResolver(messageBus, registry, lockManager, logToUI);
 
             // Subscribe to task events
@@ -320,7 +321,7 @@ namespace FluxCore.Swarm
                 _messageBus,
                 _lockManager,
                 _registry,
-                _gemini,
+                _llm,
                 maxRetries: 3,
                 logToUI: _logToUI);
 
@@ -346,7 +347,7 @@ namespace FluxCore.Swarm
                 // Open window on UI thread
                 Application.Current?.Dispatcher?.Invoke(() =>
                 {
-                    _screenAgentWindow = new ScreenAgentWindow(_screenAgent, _screenEnvironment, _gemini);
+                    _screenAgentWindow = new ScreenAgentWindow(_screenAgent, _screenEnvironment, _llm);
 
                     // Wire up events
                     _screenAgentWindow.StopRequested += (s, e) =>

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 using FluxCore.Swarm.Infrastructure;
 
 namespace FluxCore.Swarm.Agents
@@ -39,7 +40,7 @@ namespace FluxCore.Swarm.Agents
     {
         private readonly CodeAgentSpecialization _specialization;
         private readonly CodeExecutionAgent _codeRunner;
-        private readonly GeminiService? _llm;
+        private readonly ILLMService? _llm;
 
         public override AgentType Type => AgentType.Code;
 
@@ -72,7 +73,7 @@ namespace FluxCore.Swarm.Agents
             IMessageBus messageBus,
             IFileLockManager lockManager,
             IAgentRegistry registry,
-            GeminiService? llm = null,
+            ILLMService? llm = null,
             Action<string>? logToUI = null)
             : base(agentId, messageBus, lockManager, registry, logToUI)
         {

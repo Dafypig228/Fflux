@@ -1,80 +1,150 @@
 using System;
-using Microsoft.CognitiveServices.Speech;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
+using NAudio.Wave;
 
 namespace FluxCore
 {
+    /// <summary>
+    /// Audio Service вЂ” real-time STT via ElevenLabs Scribe v2 Realtime WebSocket.
+    ///
+    /// Streams 16kHz PCM chunks from NAudio to ElevenLabs server-side VAD в†’ ~150ms latency.
+    /// </summary>
     public class AudioService : IDisposable
     {
-        // Твой ключ и регион (оставляем как есть)
-        private const string SPEECH_KEY = "GAxht5qWEmwDfZRlOeYLNbdR4ObAZIiPF7xfRlFI0WVnxJLPY3O7JQQJ99BLAC3pKaRXJ3w3AAAYACOG9yir";
-        private const string SPEECH_REGION = "eastasia";
+        private readonly ElevenLabsLiveService _live;
+        private WaveInEvent? _waveIn;
+        private bool _isRecording;
+        private bool _speechActive;
+        private int _consecutiveFailures;
 
-        private SpeechRecognizer? _recognizer;
+        private const int SAMPLE_RATE = 16000;
+        private const int BITS_PER_SAMPLE = 16;
+        private const int CHANNELS = 1;
+        private const float VOLUME_THRESHOLD = 0.02f;
 
         public event Action<string>? OnFinalText;
         public event Action<string>? OnPartialText;
         public event Action<string>? OnError;
+        public event Action? OnConnected;
 
-        // ДОБАВИЛ ПАРАМЕТР: language (по умолчанию английский)
-        public async void StartContinuousRecording(string language = "ru-RU")
+        public AudioService(string apiKey, string language = "ru")
         {
-            if (_recognizer != null)
+            _live = new ElevenLabsLiveService(apiKey, language);
+            _live.OnTranscript += text => OnFinalText?.Invoke(text);
+            _live.OnError += err => OnError?.Invoke(err);
+            _live.OnConnected += () =>
             {
-                await Stop();
-            }
+                _consecutiveFailures = 0;
+                Debug.WriteLine("[AudioService] Live API connected");
+                OnConnected?.Invoke();
+            };
+            _live.OnDisconnected += () =>
+            {
+                Debug.WriteLine("[AudioService] Live API disconnected");
+                if (_isRecording)
+                {
+                    _consecutiveFailures++;
+                    if (_consecutiveFailures > 3)
+                    {
+                        OnError?.Invoke("ElevenLabs STT: connection rejected repeatedly. Check API key in Settings.");
+                        return;
+                    }
+                    // Delay before retry to avoid flooding the server
+                    _ = Task.Delay(3000).ContinueWith(t =>
+                    {
+                        if (_isRecording) _ = _live.ConnectAsync();
+                    });
+                }
+            };
+        }
+
+
+        public async Task StartContinuousRecording(string language = "auto")
+        {
+            if (_isRecording) return;
 
             try
             {
-                var config = SpeechConfig.FromSubscription(SPEECH_KEY, SPEECH_REGION);
+                await Stop();
 
-                // ВАЖНО: Присваиваем язык из аргумента
-                config.SpeechRecognitionLanguage = language;
+                // Connect to ElevenLabs Scribe Realtime
+                await _live.ConnectAsync();
 
-                config.SetProfanity(ProfanityOption.Raw);
-
-                _recognizer = new SpeechRecognizer(config);
-
-                _recognizer.Recognizing += (s, e) => OnPartialText?.Invoke(e.Result.Text);
-
-                _recognizer.Recognized += (s, e) =>
+                // Start NAudio mic вЂ” 16kHz/16-bit/mono matches ElevenLabs format exactly
+                _waveIn = new WaveInEvent
                 {
-                    if (e.Result.Reason == ResultReason.RecognizedSpeech && !string.IsNullOrWhiteSpace(e.Result.Text))
-                    {
-                        OnFinalText?.Invoke(e.Result.Text);
-                    }
+                    WaveFormat = new WaveFormat(SAMPLE_RATE, BITS_PER_SAMPLE, CHANNELS),
+                    BufferMilliseconds = 50
                 };
 
-                _recognizer.Canceled += (s, e) =>
+                _waveIn.DataAvailable += OnDataAvailable;
+                _waveIn.RecordingStopped += (s, e) =>
                 {
-                    if (e.Reason != CancellationReason.EndOfStream)
-                    {
-                        OnError?.Invoke($"Azure Error: {e.ErrorDetails}");
-                    }
+                    if (e.Exception != null)
+                        OnError?.Invoke($"Recording error: {e.Exception.Message}");
                 };
 
-                await _recognizer.StartContinuousRecognitionAsync();
-                Debug.WriteLine($"[AudioService] Azure Mic Started [{language}]");
+                _waveIn.StartRecording();
+                _isRecording = true;
+
+                Debug.WriteLine("[AudioService] Streaming mic started в†’ ElevenLabs Scribe");
             }
             catch (Exception ex)
             {
                 OnError?.Invoke($"Mic Init Error: {ex.Message}");
+                Debug.WriteLine($"[AudioService] Init error: {ex}");
             }
+        }
+
+        private void OnDataAvailable(object? sender, WaveInEventArgs e)
+        {
+            if (e.BytesRecorded == 0) return;
+
+            // Check peak volume to show "listening" indicator
+            float maxVolume = 0;
+            for (int i = 0; i < e.BytesRecorded - 1; i += 2)
+            {
+                short sample = BitConverter.ToInt16(e.Buffer, i);
+                float vol = Math.Abs(sample / 32768f);
+                if (vol > maxVolume) maxVolume = vol;
+            }
+
+            if (maxVolume > VOLUME_THRESHOLD)
+            {
+                if (!_speechActive)
+                {
+                    _speechActive = true;
+                    OnPartialText?.Invoke("рџЋ¤ listening...");
+                }
+            }
+            else
+            {
+                _speechActive = false;
+            }
+
+            // Send raw PCM chunk to ElevenLabs (no WAV header, no buffering)
+            // Fire-and-forget is safe here: chunks are small (~1600 bytes at 50ms) and ordered
+            _ = _live.SendAudioChunkAsync(e.Buffer, e.BytesRecorded);
         }
 
         public async Task Stop()
         {
-            if (_recognizer == null) return;
-            try { await _recognizer.StopContinuousRecognitionAsync(); }
-            catch { }
-            finally { _recognizer?.Dispose(); _recognizer = null; }
+            _isRecording = false;
+            _speechActive = false;
+
+            try { _waveIn?.StopRecording(); } catch { }
+            _waveIn?.Dispose();
+            _waveIn = null;
+
+            await _live.DisconnectAsync();
         }
 
         public void Dispose()
         {
-            _recognizer?.Dispose();
-            _recognizer = null;
+            Stop().GetAwaiter().GetResult();
+            _live.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 }

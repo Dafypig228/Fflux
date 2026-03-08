@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Windows.Automation;
 using Microsoft.Playwright;
 
 namespace FluxCore
@@ -302,26 +303,20 @@ namespace FluxCore
                 var processes = Process.GetProcesses();
                 foreach (var p in processes)
                 {
-                    // Match process name (exact or contained)
                     if (p.ProcessName.ToLower() == procName || 
                        (procName.Length > 4 && p.ProcessName.ToLower().Contains(procName)))
                     {
-                        if (p.MainWindowHandle == IntPtr.Zero) continue; // Skip background processes
+                        if (p.MainWindowHandle == IntPtr.Zero) continue;
 
-                        // ROBUST FOCUS ATTEMPT
                         IntPtr handle = p.MainWindowHandle;
-                        
-                        // 1. Force Restore if minimized
                         ShowWindow(handle, SW_RESTORE);
                         
-                        // 2. Multiple attempts to set foreground
                         bool success = false;
-                        for (int i = 0; i < 5; i++)
+                        for (int i = 0; i < 3; i++)
                         {
                             SetForegroundWindow(handle);
-                            await Task.Delay(100);
+                            await Task.Delay(50);
                             
-                            // Check if successful
                             IntPtr active = GetForegroundWindow();
                             if (active == handle) 
                             { 
@@ -329,17 +324,73 @@ namespace FluxCore
                                 break; 
                             }
                             
-                            // If failed, try minimize-restore trick to force OS attention
-                            if (i == 2)
+                            if (i == 1)
                             {
-                                ShowWindow(handle, 6); // Minimize
-                                await Task.Delay(50);
-                                ShowWindow(handle, 9); // Restore
+                                ShowWindow(handle, 6);
+                                await Task.Delay(30);
+                                ShowWindow(handle, 9);
                             }
                         }
                         
                         if (success || GetForegroundWindow() == handle)
-                             return new ExecutionResult(true, $"Focused existing: {p.ProcessName}");
+                        {
+                            // For Chrome: try to enable accessibility on existing instance
+                            if (procName == "chrome" || p.ProcessName.ToLower() == "chrome")
+                            {
+                                try
+                                {
+                                    // Request the accessibility tree — this forces Chrome to enable it
+                                    var chromeElement = AutomationElement.FromHandle(handle);
+                                    if (chromeElement != null)
+                                    {
+                                        // Attempt to walk the tree — triggers Chrome's renderer accessibility
+                                        var doc = chromeElement.FindFirst(TreeScope.Descendants,
+                                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+                                    }
+                                }
+                                catch { }
+                            }
+                            return new ExecutionResult(true, $"Focused existing: {p.ProcessName}");
+                        }
+                    }
+                }
+
+                // CHROME SPECIAL: Launch with accessibility enabled so UIA can see web page elements
+                if (procName == "chrome")
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = "chrome",
+                            Arguments = "--force-renderer-accessibility",
+                            UseShellExecute = true
+                        });
+                        await Task.Delay(500);
+                        return new ExecutionResult(true, "Opened: Chrome (with accessibility)");
+                    }
+                    catch
+                    {
+                        // Try full path
+                        string[] chromePaths = {
+                            @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                            @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Google\Chrome\Application\chrome.exe")
+                        };
+                        foreach (var path in chromePaths)
+                        {
+                            if (File.Exists(path))
+                            {
+                                Process.Start(new ProcessStartInfo
+                                {
+                                    FileName = path,
+                                    Arguments = "--force-renderer-accessibility",
+                                    UseShellExecute = true
+                                });
+                                await Task.Delay(500);
+                                return new ExecutionResult(true, "Opened: Chrome (with accessibility)");
+                            }
+                        }
                     }
                 }
 
@@ -391,14 +442,10 @@ namespace FluxCore
                     catch (Exception) { continue; } 
                 }
 
-                // Try via Windows Run (shell:AppsFolder)
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "explorer.exe",
-                    Arguments = $"shell:AppsFolder\\{target}",
-                    UseShellExecute = true
-                });
-                return new ExecutionResult(true, $"Tried shell: {target}");
+                // All search methods failed — return FAILURE (don't open Explorer!)
+                return new ExecutionResult(false, 
+                    $"Could not find application: '{target}'. Searched running processes, Start Menu, and common paths. " +
+                    $"Try using [[RUN_SHELL:Start-Process '{target}']] or the exact executable path.");
             }
             catch (Exception ex)
             {

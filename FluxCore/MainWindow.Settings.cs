@@ -31,10 +31,11 @@ namespace FluxCore
         // SETTINGS HANDLERS
         // =========================================
         private AppSettings _settings = new AppSettings();
+        private bool _loadingConfig = false;
 
         private void SliderOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            if (!IsLoaded) return;
+            if (!IsLoaded || _loadingConfig) return;
 
             // OPACITY FIX: Change background alpha instead of window opacity
             // Window opacity doesn't work well with AllowsTransparency="True"
@@ -47,7 +48,7 @@ namespace FluxCore
 
         private void SliderBlur_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            if (!IsLoaded) return;
+            if (!IsLoaded || _loadingConfig) return;
             BackgroundBlur.Radius = SliderBlur.Value;
             _settings.BlurRadius = SliderBlur.Value;
             _settings.Save();
@@ -55,18 +56,21 @@ namespace FluxCore
 
         private void AutoMinimize_Changed(object sender, RoutedEventArgs e)
         {
+            if (!IsLoaded || _loadingConfig) return;
             _settings.AutoMinimizeOnComplete = AutoMinimizeCheck.IsChecked == true;
             _settings.Save();
         }
 
         private void ElevenLabsKey_Changed(object sender, TextChangedEventArgs e)
         {
+            if (!IsLoaded || _loadingConfig) return;
             _settings.ElevenLabsApiKey = ElevenLabsKeyBox.Text.Trim();
             _settings.Save();
         }
 
         private void SttLang_Changed(object sender, RoutedEventArgs e)
         {
+            if (!IsLoaded || _loadingConfig) return;
             _settings.SttRussian = SttRuCheck.IsChecked == true;
             _settings.SttEnglish = SttEnCheck.IsChecked == true;
             _settings.SttKazakh  = SttKkCheck.IsChecked == true;
@@ -75,6 +79,7 @@ namespace FluxCore
 
         private void Tts_Changed(object sender, RoutedEventArgs e)
         {
+            if (!IsLoaded || _loadingConfig) return;
             _settings.TtsEnabled = TtsCheck.IsChecked == true;
             _settings.Save();
 
@@ -93,11 +98,155 @@ namespace FluxCore
             }
         }
 
+        // =========================================
+        // TELEGRAM SETTINGS
+        // =========================================
+
+        private void TelegramCheck_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded || _loadingConfig) return;
+            _settings.TelegramEnabled = TelegramCheck.IsChecked == true;
+            TelegramFields.Visibility = _settings.TelegramEnabled ? Visibility.Visible : Visibility.Collapsed;
+            _settings.Save();
+        }
+
+        private void TgApiId_Changed(object sender, TextChangedEventArgs e)
+        {
+            if (!IsLoaded || _loadingConfig) return;
+            if (int.TryParse(TgApiIdBox.Text.Trim(), out int id)) _settings.TelegramApiId = id;
+            _settings.Save();
+        }
+
+        private void TgApiHash_Changed(object sender, TextChangedEventArgs e)
+        {
+            if (!IsLoaded || _loadingConfig) return;
+            _settings.TelegramApiHash = TgApiHashBox.Text.Trim();
+            _settings.Save();
+        }
+
+        /// <summary>
+        /// (Re-)initialises TelegramService with the current settings.
+        /// Safe to call at startup and after a session reset.
+        /// </summary>
+        internal void InitializeTelegram()
+        {
+            // Tear down any existing connection first
+            _telegram?.Dispose();
+            _telegram        = null;
+            _jarvis.Telegram = null;
+
+            if (!_settings.TelegramEnabled
+                || _settings.TelegramApiId <= 0
+                || string.IsNullOrEmpty(_settings.TelegramApiHash))
+            {
+                UpdateTelegramStatus();
+                return;
+            }
+
+            _telegram          = new TelegramService(_settings.TelegramApiId, _settings.TelegramApiHash);
+            _telegram.DataLake = _dataLake;
+            _telegram.Memory   = _memory;
+            _jarvis.Telegram   = _telegram;
+
+            // WPF dialog for phone / verification-code / 2FA prompts
+            _telegram.AuthPrompt = (prompt) =>
+            {
+                string result = "";
+                Dispatcher.Invoke(() =>
+                {
+                    var dlg = new TelegramAuthDialog(prompt) { Owner = this };
+                    if (dlg.ShowDialog() == true) result = dlg.Answer;
+                });
+                return result;
+            };
+
+            // Route Telegram errors to the Logs panel so the full message is visible
+            _telegram.OnError += (err) => Dispatcher.InvokeAsync(() =>
+            {
+                LogMessage(err);
+                UpdateTelegramStatus();
+            });
+
+            _ = Task.Run(async () =>
+            {
+                await _telegram.StartAsync();
+                Dispatcher.InvokeAsync(UpdateTelegramStatus);
+            });
+
+            UpdateTelegramStatus();
+        }
+
+        /// <summary>
+        /// Disposes the current client (releasing file locks), deletes ALL telegram.* session
+        /// files, then reconnects from scratch. The WPF auth dialog will appear for re-auth.
+        /// </summary>
+        private async void TgResetSession_Click(object sender, RoutedEventArgs e)
+        {
+            // 1. Tear down first so WTelegramClient releases its file handles
+            _telegram?.Dispose();
+            _telegram        = null;
+            _jarvis.Telegram = null;
+            UpdateTelegramStatus();
+
+            // 2. Force GC to release any unmanaged file handles the old Client may hold,
+            //    then wait long enough for the OS to fully close them.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            await Task.Delay(1200);
+
+            // 3. Delete every telegram-related file (session, partial writes, temp files)
+            try
+            {
+                string davosDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos");
+
+                if (Directory.Exists(davosDir))
+                {
+                    foreach (var file in Directory.GetFiles(davosDir, "telegram*"))
+                    {
+                        try { File.Delete(file); }
+                        catch { /* skip if still locked */ }
+                    }
+                }
+            }
+            catch { }
+
+            // 4. Reconnect — auth dialog will appear for phone → code → 2FA
+            InitializeTelegram();
+        }
+
+        /// <summary>
+        /// Updates the Telegram status indicator in the settings panel.
+        /// </summary>
+        internal void UpdateTelegramStatus()
+        {
+            if (TelegramStatus == null) return;
+            if (_telegram == null)
+            {
+                TelegramStatus.Text = "● Not configured";
+                TelegramStatus.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(0x50, 0x60, 0x60));
+            }
+            else if (_telegram.IsConnected)
+            {
+                TelegramStatus.Text = $"● Connected ({_telegram.MessageCount} msgs)";
+                TelegramStatus.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(0x00, 0xCC, 0x88));
+            }
+            else
+            {
+                TelegramStatus.Text = $"● {_telegram.StatusMessage}";
+                TelegramStatus.Foreground = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromRgb(0xFF, 0xAA, 0x00));
+            }
+        }
+
         private void Btn_Minimize_Click(object sender, RoutedEventArgs e) => this.WindowState = WindowState.Minimized;
 
         private void Btn_ClearChat_Click(object sender, RoutedEventArgs e)
         {
             Messages.Clear();
+            SaveSession();
             AddMessage("Chat cleared.", false);
         }
 
@@ -112,6 +261,7 @@ namespace FluxCore
 
         private void LoadConfig()
         {
+            _loadingConfig = true;
             try
             {
                 _settings = AppSettings.Load();
@@ -133,8 +283,13 @@ namespace FluxCore
                 SttRuCheck.IsChecked = _settings.SttRussian;
                 SttEnCheck.IsChecked = _settings.SttEnglish;
                 SttKkCheck.IsChecked = _settings.SttKazakh;
+                TelegramCheck.IsChecked = _settings.TelegramEnabled;
+                TgApiIdBox.Text = _settings.TelegramApiId > 0 ? _settings.TelegramApiId.ToString() : "";
+                TgApiHashBox.Text = _settings.TelegramApiHash;
+                TelegramFields.Visibility = _settings.TelegramEnabled ? Visibility.Visible : Visibility.Collapsed;
             }
             catch { }
+            finally { _loadingConfig = false; }
         }
 
         private void SaveConfig()

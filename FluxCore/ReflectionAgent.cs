@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 
 namespace FluxCore
 {
@@ -11,11 +12,11 @@ namespace FluxCore
     /// </summary>
     public class ReflectionAgent
     {
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
 
-        public ReflectionAgent(GeminiService gemini)
+        public ReflectionAgent(ILLMService llm)
         {
-            _gemini = gemini;
+            _llm = llm;
         }
 
         /// <summary>
@@ -25,7 +26,6 @@ namespace FluxCore
             string originalGoal,
             string attemptedAction,
             string failureReason,
-            string screenshotBase64,
             string currentWindow)
         {
             var prompt = $@"
@@ -36,7 +36,7 @@ ATTEMPTED ACTION: {attemptedAction}
 FAILURE REASON: {failureReason}
 CURRENT WINDOW: {currentWindow}
 
-Look at the screenshot. What went wrong and how should we fix it?
+What went wrong and how should we fix it?
 
 Common issues and fixes:
 1. Wrong window focused → Open/focus the correct app first
@@ -59,10 +59,10 @@ JSON:";
 
             try
             {
-                string response = await _gemini.ChatWithHistory(
+                string response = await _llm.ChatWithHistory(
                     new List<ChatMessage>(),
                     prompt,
-                    string.IsNullOrEmpty(screenshotBase64) ? "" : "BASE64:" + screenshotBase64,
+                    "",
                     currentWindow,
                     ""
                 );

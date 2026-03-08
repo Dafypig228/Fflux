@@ -66,6 +66,7 @@ namespace FluxCore
             AppendPassive(sb, Cap(Untrusted(Telegram?.GetRecentMessages(10),              "telegram"),    1200));
             AppendPassive(sb, Cap(Untrusted(TerminalSource?.GetRecentTerminalOutput(5),   "terminal"),     600));
             AppendPassive(sb, Cap(Untrusted(EventLog?.GetRecentErrors(5),                 "eventlog"),     350));
+            AppendPassive(sb, Cap(DataLake?.GetRecent("task", 8),                                          600));
 
             // BATCH REMINDER — reinforce at key points
             if (step <= 2)

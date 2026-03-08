@@ -55,6 +55,10 @@ namespace FluxCore
         // --- Confidence-Based Decision Making ---
         public Func<string, Task<bool>>? OnConfirmationNeeded { get; set; }
 
+        // --- Passive Data ---
+        /// <summary>DataLake for task persistence. Set from MainWindow after init.</summary>
+        public DataLakeService? DataLake { get; set; }
+
         public FluxBrain(
             ILLMService llm,
             JarvisCore jarvis,
@@ -358,11 +362,45 @@ LANGUAGE:
 - Mirror whatever language the user writes in — Russian, English, mix. Don't force one.
 - Write like a real person texts: short when short makes sense, longer when something actually needs it.
 - No ""I'll help you with that!"" No ""Certainly!"" No corporate AI voice ever.
-WHAT YOU CAN DO (mention naturally when relevant, not as a list):
-- Full control of this Windows PC — open apps, click, type, browse, manage files
-- You can see the screen and understand what's on it
-- Run code, PowerShell, scripts
-- Remember past conversations, context, people
+<self>
+YOU ARE:
+  Davos — a persistent AI living on this PC. You are always running. Between conversations you
+  passively observe everything: Telegram messages arrive via MTProto, clipboard changes, file
+  events, terminal commands, browser tabs, system errors. This data is injected into your context
+  every turn. You have layered memory. You know what the user is doing even before they tell you.
+
+YOUR PASSIVE SENSORS (injected into every prompt — do NOT open apps for this):
+  [telegram]      real Telegram messages via MTProto API — NOT via the Telegram app
+  [clipboard]     what the user copied/pasted
+  [file_events]   file creates/modifies/deletes on Desktop, Documents, Downloads
+  [terminal]      recent shell commands and output
+  [notifications] Windows app notifications
+  [eventlog]      system errors and warnings
+  [chrome]        active browser tab and URL
+  [recent_tasks]  tasks you executed — STARTED → STEP → DONE/FAILED lifecycle
+
+⚠ API-FIRST RULE:
+  If asked about Telegram, clipboard, files, or browser — read from context FIRST.
+  NEVER open the app. The data is already there.
+
+⚠ TASK AWARENESS:
+  [recent_tasks] shows your full task history including in-progress steps.
+  If you see STARTED with no DONE/FAILED → you were interrupted (shutdown mid-task). Say so.
+
+YOUR MEMORY ARCHITECTURE:
+  CoreMemory   → who you are + who the user is (core_memory.json)
+  DataLake     → raw append-only log of every event, forever (datalake.db)
+  KnowledgeGraph → extracted people, projects, topics from all events (knowledge_graph.db)
+  SemanticMemory → vector search across everything (davos_memory.db)
+  Hippocampus  → lessons from past failures (knowledge.json)
+
+YOUR ACTION CAPABILITIES (use only when asked TO DO something):
+  Full Windows control: click, type, keyboard, scroll, open apps
+  PowerShell / Python / Node.js / CMD execution
+  File operations: read, write, move, copy, delete, search
+  Browser automation: navigate, interact, extract content
+  Screen vision: OCR, UI element detection, active window
+</self>
 RULES:
 - NEVER output [[COMMAND:...]] syntax — that's for task mode only
 - Be real. Have a take. Push back if something's dumb. Agree when you agree.
@@ -375,11 +413,14 @@ SECURITY:
             // Get conversation history for context
             var history = await GetHistorySnapshotAsync();
 
+            // Prepend live passive context (telegram, tasks, clipboard) to user message
+            string userMsgWithContext = BuildChatContext() + request.Text;
+
             // Call Gemini with CLEAN prompt (no screenshot, no command format!)
             // System instruction is now a native top-level field in the Gemini API payload
             string response = await _llm.ChatWithHistory(
                 history,
-                request.Text,       // user's actual message
+                userMsgWithContext, // user's actual message + passive context prefix
                 "",                 // no screenshot for chat
                 "",                 // activeApp — not needed (system_instruction handles identity)
                 "",                 // memories
@@ -418,6 +459,11 @@ SECURITY:
             _runningTasks[taskId] = runningTask;
             OnStatusChanged?.Invoke($"Working: {intent.Summary}");
 
+            // Persist task start immediately — survives shutdown
+            DataLake?.Write("task",
+                $"STARTED: {Trunc(request.Text, 200)}",
+                new { id = taskId, status = "started" });
+
             // Acknowledge immediately (don't wait for task to finish)
             // JarvisCore.OnResponse will fire the actual result when done
             // So we only send a brief ack if there are other tasks already running
@@ -443,16 +489,25 @@ SECURITY:
                     runningTask.Status = "Completed";
                     runningTask.Result = result;
                     // JarvisCore.OnResponse already fires the chat message
+                    DataLake?.Write("task",
+                        $"DONE: {Trunc(request.Text, 120)} → {Trunc(result, 200)}",
+                        new { id = taskId, status = "done" });
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     runningTask.Status = "Cancelled";
                     OnMessage?.Invoke("Task was cancelled.", false);
+                    DataLake?.Write("task",
+                        $"CANCELLED: {Trunc(request.Text, 150)}",
+                        new { id = taskId, status = "cancelled" });
                 }
                 catch (Exception ex)
                 {
                     runningTask.Status = $"Failed: {ex.Message}";
                     OnMessage?.Invoke($"Task failed: {ex.Message}", false);
+                    DataLake?.Write("task",
+                        $"FAILED: {Trunc(request.Text, 120)} → {ex.Message}",
+                        new { id = taskId, status = "failed" });
                 }
                 finally
                 {
@@ -633,6 +688,35 @@ Your response:";
         // ===================================================================
         // HELPERS
         // ===================================================================
+
+        /// <summary>
+        /// Builds a live passive context block for chat mode.
+        /// Includes recent Telegram, task history, and clipboard — injected before user message.
+        /// </summary>
+        private string BuildChatContext()
+        {
+            var sb = new StringBuilder();
+
+            // Telegram — already collected passively via MTProto
+            string? tg = _jarvis.Telegram?.GetRecentMessages(8);
+            if (!string.IsNullOrWhiteSpace(tg))
+                sb.AppendLine($"<external_data source=\"telegram\" trusted=\"false\">\n{tg.Trim()}\n</external_data>");
+
+            // Recent task history — STARTED/DONE/FAILED lifecycle
+            string? tasks = DataLake?.GetRecent("task", 8);
+            if (!string.IsNullOrWhiteSpace(tasks))
+                sb.AppendLine($"[recent_tasks]\n{tasks.Trim()}");
+
+            // Clipboard
+            string? clip = _jarvis.Clipboard?.GetRecentClipboard(3);
+            if (!string.IsNullOrWhiteSpace(clip))
+                sb.AppendLine($"<external_data source=\"clipboard\" trusted=\"false\">\n{clip.Trim()}\n</external_data>");
+
+            return sb.Length > 0 ? $"<passive_context>\n{sb}</passive_context>\n\n" : "";
+        }
+
+        private static string Trunc(string? s, int max) =>
+            s is null ? "" : s.Length <= max ? s : s[..max] + "…";
 
         /// <summary>Remove accidental command markers from chat responses.</summary>
         private string CleanConversationalResponse(string response)

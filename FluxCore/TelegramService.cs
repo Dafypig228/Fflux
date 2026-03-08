@@ -37,7 +37,18 @@ namespace FluxCore
         public DataLakeService? DataLake { get; set; }
         public MemoryService?   Memory   { get; set; }
 
-        public bool IsConnected { get; private set; }
+        public bool   IsConnected   { get; private set; }
+        public int    MessageCount  => _recent.Count;
+        public string StatusMessage { get; private set; } = "Not started";
+
+        /// <summary>Fired on connection errors. Carries the full error string.</summary>
+        public event Action<string>? OnError;
+
+        /// <summary>
+        /// Called when WTelegramClient needs phone/code/password from the user.
+        /// Set this to a WPF dialog callback; falls back to Console.ReadLine if null.
+        /// </summary>
+        public Func<string, string>? AuthPrompt { get; set; }
 
         public TelegramService(int apiId, string apiHash)
         {
@@ -50,22 +61,95 @@ namespace FluxCore
 
         /// <summary>
         /// Starts the Telegram client. Run in background — blocks on first-run auth.
-        /// Subsequent starts use the saved session and are instant.
+        /// On a corrupt/locked session file, automatically clears the file and retries once.
         /// </summary>
         public async Task StartAsync()
         {
+            StatusMessage = "Connecting…";
             try
             {
-                _client = new Client(ConfigFunc);
+                _client           = new Client(ConfigFunc);
                 _client.OnUpdate += OnUpdate;
                 await _client.LoginUserIfNeeded();
-                IsConnected = true;
+                IsConnected   = true;
+                StatusMessage = "Connected";
                 System.Diagnostics.Debug.WriteLine("[Telegram] Connected ✓");
+            }
+            catch (Exception ex) when (IsSessionFileError(ex))
+            {
+                // The Client constructor opened the session file before throwing,
+                // so the file handle may still be held internally. Force release.
+                _client?.Dispose();
+                _client = null;
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+
+                DeleteSessionFiles();           // now the file should be unlocked
+                await Task.Delay(500);          // let the OS fully close the handle
+
+                System.Diagnostics.Debug.WriteLine("[Telegram] Corrupt session detected — auto-recovering…");
+                await StartInternalAsync();     // retry exactly once (no recursion)
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[Telegram] Start error: {ex.Message}");
+                _client?.Dispose();
+                _client = null;
+                SetError(ex);
             }
+        }
+
+        /// <summary>Single-attempt connect (used as the auto-recover retry).</summary>
+        private async Task StartInternalAsync()
+        {
+            try
+            {
+                _client           = new Client(ConfigFunc);
+                _client.OnUpdate += OnUpdate;
+                await _client.LoginUserIfNeeded();
+                IsConnected   = true;
+                StatusMessage = "Connected";
+                System.Diagnostics.Debug.WriteLine("[Telegram] Connected ✓ (after recovery)");
+            }
+            catch (Exception ex)
+            {
+                _client?.Dispose();
+                _client = null;
+                SetError(ex);
+            }
+        }
+
+        private static bool IsSessionFileError(Exception ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+            {
+                if (e.Message.Contains("session file", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (e is System.Security.Cryptography.CryptographicException)
+                    return true;
+            }
+            return false;
+        }
+
+        private void DeleteSessionFiles()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(_sessionPath)!;
+                if (Directory.Exists(dir))
+                    foreach (var f in Directory.GetFiles(dir, "telegram*"))
+                        try { File.Delete(f); } catch { }
+            }
+            catch { }
+        }
+
+        private void SetError(Exception ex)
+        {
+            var msgs = new System.Collections.Generic.List<string>();
+            for (var e = ex; e != null; e = e.InnerException) msgs.Add(e.Message);
+            string fullMsg = string.Join(" → ", msgs);
+            StatusMessage = $"Error: {fullMsg}";
+            System.Diagnostics.Debug.WriteLine($"[Telegram] Start error: {ex}");
+            OnError?.Invoke($"[Telegram error] {fullMsg}");
         }
 
         private string ConfigFunc(string what) => what switch
@@ -79,9 +163,10 @@ namespace FluxCore
             _                   => ""
         };
 
-        // Console I/O runs fine on background threads in WPF
-        private static string PromptUser(string prompt)
+        private string PromptUser(string prompt)
         {
+            if (AuthPrompt != null) return AuthPrompt(prompt);
+            // Debug fallback — only works if a console is attached
             Console.Write(prompt);
             return Console.ReadLine()?.Trim() ?? "";
         }
@@ -107,6 +192,9 @@ namespace FluxCore
         private Task HandleMessageAsync(TL.Message msg, Dictionary<long, User> users)
         {
             if (string.IsNullOrEmpty(msg.message)) return Task.CompletedTask;
+
+            // Skip broadcast channels (PeerChannel) — only keep DMs (PeerUser) and small groups (PeerChat)
+            if (msg.peer_id is PeerChannel) return Task.CompletedTask;
 
             // Resolve sender name
             string senderName = "Unknown";

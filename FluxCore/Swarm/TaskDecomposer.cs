@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 using FluxCore.Swarm.Infrastructure;
 
 namespace FluxCore.Swarm
@@ -25,7 +26,7 @@ namespace FluxCore.Swarm
     /// </summary>
     public class TaskDecomposer
     {
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
         private readonly Action<string>? _logToUI;
 
         private const string DECOMPOSITION_PROMPT = @"You are a task decomposition expert for an AI agent swarm system.
@@ -95,9 +96,9 @@ OUTPUT FORMAT (JSON array):
 
 Return ONLY the JSON array, no markdown formatting.";
 
-        public TaskDecomposer(GeminiService gemini, Action<string>? logToUI = null)
+        public TaskDecomposer(ILLMService llm, Action<string>? logToUI = null)
         {
-            _gemini = gemini;
+            _llm = llm;
             _logToUI = logToUI;
         }
 
@@ -117,12 +118,7 @@ Return ONLY the JSON array, no markdown formatting.";
                     .Replace("{GOAL}", goal)
                     .Replace("{WORKING_DIR}", workingDirectory);
 
-                var history = new List<ChatMessage>
-                {
-                    new ChatMessage { IsUser = true, Text = prompt }
-                };
-
-                var response = await _gemini.ChatWithHistory(history, prompt, "", "", "");
+                var response = await _llm.ChatWithHistory(new List<ChatMessage>(), prompt, "", "", "");
 
                 _logToUI?.Invoke($"[TaskDecomposer] Received response ({response.Length} chars)");
 

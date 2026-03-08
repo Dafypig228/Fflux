@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 using FluxCore.Swarm.Agents;
 using FluxCore.Swarm.Infrastructure;
 
@@ -29,7 +30,7 @@ namespace FluxCore.Swarm
         private readonly IMessageBus _messageBus;
         private readonly IAgentRegistry _registry;
         private readonly IFileLockManager _lockManager;
-        private readonly GeminiService? _gemini;
+        private readonly ILLMService? _llm;
         private readonly AgentPoolConfig _config;
         private readonly Action<string>? _logToUI;
 
@@ -59,14 +60,14 @@ namespace FluxCore.Swarm
             IMessageBus messageBus,
             IAgentRegistry registry,
             IFileLockManager lockManager,
-            GeminiService? gemini = null,
+            ILLMService? llm = null,
             AgentPoolConfig? config = null,
             Action<string>? logToUI = null)
         {
             _messageBus = messageBus;
             _registry = registry;
             _lockManager = lockManager;
-            _gemini = gemini;
+            _llm = llm;
             _config = config ?? new AgentPoolConfig();
             _logToUI = logToUI;
 
@@ -325,7 +326,7 @@ namespace FluxCore.Swarm
                 _messageBus,
                 _lockManager,
                 _registry,
-                _gemini,
+                _llm,
                 _logToUI);
         }
 

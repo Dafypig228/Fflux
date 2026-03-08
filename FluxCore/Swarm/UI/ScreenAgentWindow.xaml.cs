@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using FluxCore.LLM;
 using FluxCore.Swarm.Agents;
 using FluxCore.Swarm.Environment;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
@@ -33,7 +34,7 @@ namespace FluxCore.Swarm.UI
     {
         private readonly ScreenAgent _screenAgent;
         private readonly IScreenEnvironment _screenEnv;
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
         private readonly DispatcherTimer _screenshotTimer;
         private readonly List<ChatBubble> _chatHistory = new();
         private CancellationTokenSource? _cts;
@@ -47,13 +48,13 @@ namespace FluxCore.Swarm.UI
         public ScreenAgentWindow(
             ScreenAgent screenAgent,
             IScreenEnvironment screenEnvironment,
-            GeminiService gemini)
+            ILLMService llm)
         {
             InitializeComponent();
 
             _screenAgent = screenAgent;
             _screenEnv = screenEnvironment;
-            _gemini = gemini;
+            _llm = llm;
             _cts = new CancellationTokenSource();
 
             // Set up screenshot refresh timer (every 1.5 seconds)
@@ -243,13 +244,8 @@ Be helpful, friendly, and conversational.
 
 Respond naturally as if you're a helpful assistant:";
 
-                var history = new List<ChatMessage>
-                {
-                    new ChatMessage { IsUser = true, Text = prompt }
-                };
-
                 var imageParam = !string.IsNullOrEmpty(screenshot) ? $"Base64:{screenshot}" : "";
-                var response = await _gemini.ChatWithHistory(history, prompt, imageParam, "", "");
+                var response = await _llm.ChatWithHistory(new List<ChatMessage>(), prompt, imageParam, "", "");
 
                 AddAgentMessage(response);
 

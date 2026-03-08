@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 
 namespace FluxCore
 {
@@ -10,12 +11,12 @@ namespace FluxCore
     /// </summary>
     public class ValidatorAgent
     {
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
         private const int MAX_RETRIES = 2;
 
-        public ValidatorAgent(GeminiService gemini)
+        public ValidatorAgent(ILLMService llm)
         {
-            _gemini = gemini;
+            _llm = llm;
         }
 
         /// <summary>
@@ -189,7 +190,7 @@ REASON: [Brief explanation of what changed or didn't change]
                 // TODO: For true diff, we need multi-image support. 
                 // For now, let's just show the AFTER image and ask "Does this look like '{intent}' was done?"
                 
-                string response = await _gemini.ChatWithHistory(history, prompt, "BASE64:" + afterBase64, "", "");
+                string response = await _llm.ChatWithHistory(history, prompt, "BASE64:" + afterBase64, "", "", null, 0.1f);
                 
                 bool isSuccess = response.ToUpper().Contains("VERDICT: SUCCESS");
                 string reason = response.Contains("REASON:") 

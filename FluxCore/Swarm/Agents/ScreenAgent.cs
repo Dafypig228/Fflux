@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxCore.LLM;
 using FluxCore.Swarm.Environment;
 using FluxCore.Swarm.Infrastructure;
 
@@ -16,7 +17,7 @@ namespace FluxCore.Swarm.Agents
     {
         private readonly IScreenEnvironment _screenEnv;
         private readonly ValidatorAgent _validator;
-        private readonly GeminiService _gemini;
+        private readonly ILLMService _llm;
         private readonly int _maxRetries;
 
         public override AgentType Type => AgentType.Screen;
@@ -42,14 +43,14 @@ namespace FluxCore.Swarm.Agents
             IMessageBus messageBus,
             IFileLockManager lockManager,
             IAgentRegistry registry,
-            GeminiService gemini,
+            ILLMService llm,
             int maxRetries = 3,
             Action<string>? logToUI = null)
             : base(agentId, messageBus, lockManager, registry, logToUI)
         {
             _screenEnv = screenEnvironment;
-            _gemini = gemini;
-            _validator = new ValidatorAgent(gemini);
+            _llm = llm;
+            _validator = new ValidatorAgent(llm);
             _maxRetries = maxRetries;
         }
 
@@ -140,12 +141,7 @@ TARGET: (if action)
 DETAILS: (if action)
 SUMMARY: Brief description of what user wants";
 
-            var history = new List<ChatMessage>
-            {
-                new ChatMessage { IsUser = true, Text = prompt }
-            };
-
-            var response = await _gemini.ChatWithHistory(history, prompt, $"Base64:{screenshot}", "", "");
+            var response = await _llm.ChatWithHistory(new List<ChatMessage>(), prompt, $"Base64:{screenshot}", "", "");
 
             // Parse the response
             var intent = new UserIntent { OriginalMessage = message };
@@ -253,12 +249,7 @@ If they're asking what you see, describe the screen.
 If they're asking a general question, answer it.
 Keep your response concise but friendly.";
 
-            var history = new List<ChatMessage>
-            {
-                new ChatMessage { IsUser = true, Text = prompt }
-            };
-
-            return await _gemini.ChatWithHistory(history, prompt, $"Base64:{screenshot}", "", "");
+            return await _llm.ChatWithHistory(new List<ChatMessage>(), prompt, $"Base64:{screenshot}", "", "");
         }
 
         private class UserIntent
@@ -648,12 +639,7 @@ If you cannot find it, respond with: NOT_FOUND
 
 Screenshot is provided as base64 image.";
 
-            var history = new List<ChatMessage>
-            {
-                new ChatMessage { IsUser = true, Text = prompt }
-            };
-
-            var response = await _gemini.ChatWithHistory(history, prompt, $"Base64:{screenshot}", "", "");
+            var response = await _llm.ChatWithHistory(new List<ChatMessage>(), prompt, $"Base64:{screenshot}", "", "");
 
             if (response.Contains("NOT_FOUND"))
                 return null;

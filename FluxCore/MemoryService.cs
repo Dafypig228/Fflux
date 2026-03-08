@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
+using FluxCore.LLM;
 
 namespace FluxCore
 {
@@ -20,13 +21,29 @@ namespace FluxCore
     public class MemoryService
     {
         private readonly string _dbPath;
-        private readonly GeminiService _gemini; // For generating embeddings
+        private readonly ILLMService _llm;
         private List<MemoryItem> _cachedMemories = new List<MemoryItem>(); // Cache for fast search
 
-        public MemoryService(GeminiService gemini)
+        public MemoryService(ILLMService llm)
         {
-            _gemini = gemini;
-            _dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "flux_memory_v2.db");
+            _llm = llm;
+
+            // Stable path in %APPDATA%\Davos — does not change between Debug/Release builds
+            string appData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos");
+            Directory.CreateDirectory(appData);
+            string newDb = Path.Combine(appData, "davos_memory.db");
+
+            // Migrate old databases from BaseDirectory if they exist
+            string oldDb1 = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "flux_memory_v2.db");
+            string oldDb2 = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "davos_memory.db");
+            if (!File.Exists(newDb))
+            {
+                if (File.Exists(oldDb2)) File.Move(oldDb2, newDb);
+                else if (File.Exists(oldDb1)) File.Move(oldDb1, newDb);
+            }
+
+            _dbPath = newDb;
             InitializeDatabase();
         }
 
@@ -94,7 +111,7 @@ namespace FluxCore
             if (string.IsNullOrWhiteSpace(content)) return;
 
             // 1. Generate Embedding
-            float[] embedding = await _gemini.GetEmbeddingAsync(content);
+            float[] embedding = await _llm.GetEmbeddingAsync(content);
 
             // 2. Save to DB
             using (var connection = new SqliteConnection($"Data Source={_dbPath}"))
@@ -156,7 +173,7 @@ OUTPUT FORMAT:
 3. STATISTICS: [Mention main apps used and time periods if visible]
 ";
 
-            string summary = await _gemini.GenerateText(prompt);
+            string summary = await _llm.GenerateText(prompt);
 
             // 3. Save Summary
             using (var connection = new SqliteConnection($"Data Source={_dbPath}"))
@@ -178,7 +195,7 @@ OUTPUT FORMAT:
             if (_cachedMemories.Count == 0) await LoadCacheAsync();
             
             // 1. Get query embedding
-            float[] queryEmbedding = await _gemini.GetEmbeddingAsync(query);
+            float[] queryEmbedding = await _llm.GetEmbeddingAsync(query);
             if (queryEmbedding.Length == 0) return new List<string>();
 
             // 2. Cosine Similarity in Memory
@@ -253,7 +270,7 @@ LOG:
 
 SUMMARY:";
             
-            _cachedSessionSummary = await _gemini.GenerateText(prompt);
+            _cachedSessionSummary = await _llm.GenerateText(prompt);
             _lastSummaryTime = DateTime.Now;
             
             return _cachedSessionSummary;

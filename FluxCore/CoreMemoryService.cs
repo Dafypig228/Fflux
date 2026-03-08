@@ -37,6 +37,9 @@ namespace FluxCore
                 "Davos", "core_memory.json");
 
             _blocks = Load();
+
+            // Create the file only if it doesn't exist yet (first run)
+            if (!File.Exists(_path)) Save();
         }
 
         // ── Public API ────────────────────────────────────────────────────────────
@@ -102,18 +105,32 @@ Recent conversation:
 USER: {Trunc(userMessage, 400)}
 DAVOS: {Trunc(davosReply, 400)}
 
-TASK: If this conversation reveals NEW information about the user (name, relationships, preferences, current focus, what they're working on today), return an UPDATED version of the JSON with those changes applied. Keep existing correct information. Be conservative — only update what clearly changed.
-If nothing new was learned, return exactly: null
+TASK: Update the memory JSON based on this conversation.
 
-Return ONLY valid JSON or null. No explanation.";
+CORE block (persona, human, relationships, preferences):
+  - Update ONLY if the user revealed something new about themselves, their name, relationships, or preferences.
 
-                string raw = await _llm.GenerateText(prompt, temperature: 0.1f);
+WORKING block (currentFocus, todayHighlights, recentTopics):
+  - Update FREELY every turn. Always capture:
+    - currentFocus: what the user is working on RIGHT NOW
+    - recentTopics: add the main topic(s) from this conversation (keep last 5)
+    - todayHighlights: add any notable events from this turn (keep last 5)
+
+Return the COMPLETE updated JSON, or null ONLY if the conversation was pure small talk with zero useful information.
+
+Return ONLY valid JSON or null. No explanation, no markdown.";
+
+                string raw = await _llm.GenerateText(prompt, temperature: 0.35f);
                 raw = raw.Trim();
                 if (raw == "null" || string.IsNullOrEmpty(raw)) return;
 
                 // Strip markdown fences if present
-                if (raw.StartsWith("```")) raw = raw.Split('\n', 2)[1];
-                if (raw.EndsWith("```"))   raw = raw[..^3];
+                if (raw.StartsWith("```"))
+                {
+                    raw = raw.Split('\n', 2).LastOrDefault() ?? raw;
+                    if (raw.EndsWith("```")) raw = raw[..^3];
+                    raw = raw.Trim();
+                }
 
                 var updated = JsonSerializer.Deserialize<CoreMemoryBlocks>(raw, _jsonOpts);
                 if (updated == null) return;
@@ -164,8 +181,8 @@ Return ONLY valid JSON or null. No explanation.";
         {
             Core = new CoreBlock
             {
-                Persona       = "Davos — AI companion living on this PC. Friend, not tool.",
-                Human         = "User details not yet known. Learn from conversations.",
+                Persona       = "Davos — persistent AI living on this PC. Passive sensors: Telegram (MTProto API), clipboard, file events, terminal history, notifications, event log, Chrome bridge, VS Code. Memory layers: CoreMemory (this file), DataLake (raw events), KnowledgeGraph (entities), SemanticMemory (vector), Hippocampus (failure lessons). Never opens apps to read data already in context.",
+                Human         = "User details unknown. Learn from conversations and passive context.",
                 Relationships = new Dictionary<string, string>(),
                 Preferences   = new List<string>()
             },
