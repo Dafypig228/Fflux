@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using TL;
 using WTelegram;
@@ -15,21 +16,20 @@ namespace FluxCore
     /// Setup (one-time):
     ///   1. Get api_id + api_hash from https://my.telegram.org
     ///   2. Set TelegramEnabled=true, TelegramApiId, TelegramApiHash in AppSettings
-    ///   3. First run: prompts for phone → verification code → optional 2FA password
-    ///   4. Session saved to %APPDATA%\Davos\telegram.dat — no re-auth after
+    ///   3. First run: auth dialog appears for phone → code → optional 2FA
+    ///   4. Session saved to %APPDATA%\Davos\telegram.dat (raw bytes, no encryption)
     ///
-    /// Session storage uses the WTelegramClient Stream constructor overload, which bypasses
-    /// the library's internal AES encryption of the session file (the source of the
-    /// "Specified key is not a valid size" CryptographicException in file mode).
+    /// Uses the WTelegramClient Stream constructor to bypass AES file encryption,
+    /// which caused "key not valid size" errors in file-based session mode.
     ///
-    /// Messages are stored in MemoryService (semantic search) and DataLake (SQL).
-    /// Context available via GetRecentMessages() for BuildDynamicContext.
+    /// All connection events are surfaced via OnLog (informational) and OnError (failures).
+    /// Wire both to the Logs panel to see exactly what WTelegramClient is doing.
     /// </summary>
     public class TelegramService : IDisposable
     {
         private Client? _client;
         private readonly string _davosDir;
-        private readonly string _sessionDataPath;   // telegram.dat — raw session bytes, no encryption
+        private readonly string _sessionDataPath;   // telegram.dat — raw session bytes
         private readonly int    _apiId;
         private readonly string _apiHash;
 
@@ -46,8 +46,11 @@ namespace FluxCore
         public int    MessageCount  => _recent.Count;
         public string StatusMessage { get; private set; } = "Not started";
 
-        /// <summary>Fired on connection errors. Carries the full error string.</summary>
+        /// <summary>Fired on connection errors and failures.</summary>
         public event Action<string>? OnError;
+
+        /// <summary>Fired for informational log messages (connection progress, config keys, etc.).</summary>
+        public event Action<string>? OnLog;
 
         /// <summary>
         /// Called when WTelegramClient needs phone/code/password from the user.
@@ -65,73 +68,125 @@ namespace FluxCore
         }
 
         /// <summary>
-        /// Starts the Telegram client using stream-based session storage.
-        /// Stream mode bypasses WTelegramClient's AES session-file encryption entirely,
-        /// so no CryptographicException can occur regardless of api_hash length.
-        /// Run in background — blocks on first-run auth.
+        /// Starts the Telegram client. Logs every step to OnLog so progress is visible
+        /// in the Logs panel. Includes a 90-second timeout for the login phase.
+        /// Run in background — blocks on first-run auth prompts.
         /// </summary>
         public async Task StartAsync()
         {
             StatusMessage = "Connecting…";
-            try
+            Log("[Telegram] StartAsync — building session stream");
+
+            // Build session stream from disk if available, else start fresh
+            var stream = new PersistOnFlushStream(_sessionDataPath);
+            if (File.Exists(_sessionDataPath))
             {
-                // Build a self-persisting, unencrypted session stream.
-                // WTelegramClient reads/writes raw bytes to it — no AES key derivation from api_hash.
-                var stream = new AutoSaveStream(_sessionDataPath);
-                if (File.Exists(_sessionDataPath))
+                try
                 {
                     byte[] saved = File.ReadAllBytes(_sessionDataPath);
                     stream.Write(saved, 0, saved.Length);
-                    stream.Position = 0; // rewind so WTelegramClient can read the saved session
+                    stream.Position = 0;
+                    Log($"[Telegram] Loaded existing session ({saved.Length} bytes)");
                 }
+                catch (Exception ex)
+                {
+                    Log($"[Telegram] Cannot load session: {ex.Message} — starting fresh");
+                }
+            }
+            else
+            {
+                Log("[Telegram] No session file found — fresh auth will be needed");
+            }
 
+            try
+            {
+                Log("[Telegram] Creating WTelegramClient (Stream mode, no AES encryption)…");
                 _client           = new Client(ConfigFunc, stream);
                 _client.OnUpdate += OnUpdate;
-                await _client.LoginUserIfNeeded();
+
+                Log("[Telegram] Calling LoginUserIfNeeded (90 s timeout)…");
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+                await _client.LoginUserIfNeeded().WaitAsync(cts.Token);
+
+                // Persist the fully-authenticated session to disk immediately
+                stream.SaveNow();
+
                 IsConnected   = true;
                 StatusMessage = "Connected";
-                System.Diagnostics.Debug.WriteLine("[Telegram] Connected ✓");
+                Log("[Telegram] Connected ✓ — session saved to telegram.dat");
+            }
+            catch (OperationCanceledException)
+            {
+                _client?.Dispose();
+                _client = null;
+                // Delete any partial session so next startup starts fresh
+                try { File.Delete(_sessionDataPath); } catch { }
+                StatusMessage = "Error: Connection timed out (90 s) — check network/firewall";
+                OnError?.Invoke("[Telegram] Connection timed out after 90 s. Is Telegram accessible from your network?");
             }
             catch (Exception ex)
             {
                 _client?.Dispose();
                 _client = null;
+                // Delete partial session — a new one will be created on next auth
+                try { File.Delete(_sessionDataPath); } catch { }
                 SetError(ex);
             }
         }
 
-        private string ConfigFunc(string what) => what switch
+        private string ConfigFunc(string what)
         {
-            "api_id"            => _apiId.ToString(),
-            "api_hash"          => _apiHash,
-            // "session_pathname" is NOT used when a sessionStore Stream is passed to Client ctor
-            "phone_number"      => PromptUser("Telegram phone (+1234567890): "),
-            "verification_code" => PromptUser("Telegram verification code: "),
-            "password"          => PromptUser("2FA password (Enter to skip): "),
-            _                   => ""
-        };
+            // Log every key WTelegramClient requests (mask sensitive values for privacy)
+            string tag = what switch
+            {
+                "api_id"            => $"api_id={_apiId}",
+                "api_hash"          => "api_hash=<masked>",
+                "phone_number"      => "phone_number (will show auth dialog)",
+                "verification_code" => "verification_code (will show auth dialog)",
+                "password"          => "password/2FA (will show auth dialog)",
+                _                   => $"key={what}"
+            };
+            Log($"[Telegram] ConfigFunc: {tag}");
+
+            return what switch
+            {
+                "api_id"            => _apiId.ToString(),
+                "api_hash"          => _apiHash,
+                // session_pathname is never called when Stream is passed to ctor
+                "phone_number"      => PromptUser("Telegram phone (+1234567890): "),
+                "verification_code" => PromptUser("Telegram verification code: "),
+                "password"          => PromptUser("2FA password (Enter to skip): "),
+                _                   => ""
+            };
+        }
 
         private string PromptUser(string prompt)
         {
+            Log($"[Telegram] Showing auth dialog: \"{prompt}\"");
             if (AuthPrompt != null) return AuthPrompt(prompt);
             // Debug fallback — only works if a console is attached
             Console.Write(prompt);
             return Console.ReadLine()?.Trim() ?? "";
         }
 
+        private void Log(string msg)
+        {
+            System.Diagnostics.Debug.WriteLine(msg);
+            OnLog?.Invoke(msg);
+        }
+
         private void SetError(Exception ex)
         {
-            var msgs = new System.Collections.Generic.List<string>();
+            var msgs = new List<string>();
             for (var e = ex; e != null; e = e.InnerException) msgs.Add(e.Message);
             string fullMsg = string.Join(" → ", msgs);
             StatusMessage = $"Error: {fullMsg}";
-            System.Diagnostics.Debug.WriteLine($"[Telegram] Start error: {ex}");
+            System.Diagnostics.Debug.WriteLine($"[Telegram] Error: {ex}");
             OnError?.Invoke($"[Telegram error] {fullMsg}");
         }
 
         /// <summary>
-        /// Deletes all telegram* files (telegram.dat, any legacy telegram.session files, etc.)
-        /// so the next StartAsync() begins a fresh session with the auth dialog.
+        /// Deletes all telegram* files so the next StartAsync() begins fresh (auth dialog appears).
         /// </summary>
         internal void DeleteSessionFiles()
         {
@@ -147,10 +202,7 @@ namespace FluxCore
         private async Task OnUpdate(IObject arg)
         {
             if (arg is not UpdatesBase updates) return;
-
-            // UpdatesBase.Users is populated from the server for this batch
             var users = updates.Users;
-
             foreach (var update in updates.UpdateList)
             {
                 try
@@ -166,7 +218,7 @@ namespace FluxCore
         {
             if (string.IsNullOrEmpty(msg.message)) return Task.CompletedTask;
 
-            // Skip broadcast channels (PeerChannel) — only keep DMs (PeerUser) and small groups (PeerChat)
+            // Skip broadcast channels (PeerChannel) — only DMs (PeerUser) and small groups (PeerChat)
             if (msg.peer_id is PeerChannel) return Task.CompletedTask;
 
             // Resolve sender name
@@ -180,31 +232,23 @@ namespace FluxCore
             // Resolve chat name
             string chatName = msg.peer_id switch
             {
-                PeerUser   _   => senderName,              // DM
-                PeerChat   pc  => $"Group_{pc.chat_id}",
+                PeerUser   _    => senderName,
+                PeerChat   pc   => $"Group_{pc.chat_id}",
                 PeerChannel pch => $"Channel_{pch.channel_id}",
-                _              => "Unknown"
+                _               => "Unknown"
             };
 
-            var when  = msg.Date; // TL.Message.Date is already DateTime (UTC) in WTelegramClient
-            var tgMsg = new TgMessage(senderName, chatName, msg.message, when);
-
+            var tgMsg = new TgMessage(senderName, chatName, msg.message, msg.Date);
             lock (_lock)
             {
                 _recent.Add(tgMsg);
                 if (_recent.Count > MAX_RECENT) _recent.RemoveAt(0);
             }
 
-            // Persist to data lake (fire-and-forget — never block incoming updates)
-            DataLake?.Write("telegram", msg.message,
-                new { sender = senderName, chat = chatName });
+            DataLake?.Write("telegram", msg.message, new { sender = senderName, chat = chatName });
 
-            // Store in semantic memory
             if (Memory != null)
-            {
-                string memContent = $"[Telegram] {senderName} in {chatName}: {msg.message}";
-                _ = Memory.Save(memContent, "Telegram");
-            }
+                _ = Memory.Save($"[Telegram] {senderName} in {chatName}: {msg.message}", "Telegram");
 
             return Task.CompletedTask;
         }
@@ -222,8 +266,7 @@ namespace FluxCore
             }
         }
 
-        private static string Trim(string s, int max) =>
-            s.Length <= max ? s : s[..max] + "…";
+        private static string Trim(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
         private record TgMessage(string Sender, string Chat, string Text, DateTime When);
 
@@ -236,22 +279,25 @@ namespace FluxCore
             }
         }
 
-        // =====================================================================
-        // AutoSaveStream — MemoryStream that persists to disk on every Flush().
-        // Passed to the WTelegramClient Client constructor so session bytes are
-        // stored as raw (unencrypted) data, bypassing the AES file encryption
-        // that caused "Specified key is not a valid size" on every startup.
-        // =====================================================================
+        // ====================================================================
+        // PersistOnFlushStream — MemoryStream that auto-saves to disk on Flush.
+        // Bypasses WTelegramClient's internal AES file encryption entirely.
+        // ====================================================================
 
-        private sealed class AutoSaveStream : MemoryStream
+        private sealed class PersistOnFlushStream : MemoryStream
         {
             private readonly string _path;
 
-            public AutoSaveStream(string path) : base() { _path = path; }
+            public PersistOnFlushStream(string path) : base() { _path = path; }
 
             public override void Flush()
             {
                 base.Flush();
+                SaveNow();
+            }
+
+            public void SaveNow()
+            {
                 try { File.WriteAllBytes(_path, ToArray()); }
                 catch (Exception ex)
                 {
@@ -261,8 +307,7 @@ namespace FluxCore
 
             protected override void Dispose(bool disposing)
             {
-                if (disposing)
-                    try { File.WriteAllBytes(_path, ToArray()); } catch { }
+                if (disposing) SaveNow();
                 base.Dispose(disposing);
             }
         }

@@ -148,14 +148,24 @@ namespace FluxCore
             _telegram.Memory   = _memory;
             _jarvis.Telegram   = _telegram;
 
+            // Route WTelegramClient's own internal logs (level >= 2 = info/warning/error) to the Logs panel.
+            // This reveals exactly what WTelegramClient is doing: DC selection, key exchange, auth state, etc.
+            WTelegram.Helpers.Log = (level, msg) =>
+            {
+                if (level >= 2) // 0=verbose 1=debug 2=info 3=warning 4=error
+                    Dispatcher.InvokeAsync(() => LogMessage($"[WTG] {msg.TrimEnd()}"));
+            };
+
+            // Route our own TelegramService log messages to the Logs panel
+            _telegram.OnLog += (msg) => Dispatcher.InvokeAsync(() => LogMessage(msg));
+
             // WPF dialog for phone / verification-code / 2FA prompts
             _telegram.AuthPrompt = (prompt) =>
             {
                 string result = "";
                 Dispatcher.Invoke(() =>
                 {
-                    LogMessage($"[Telegram] Auth prompt: {prompt}");
-                    // Dialog is Topmost=True + CenterScreen so it appears above the overlay
+                    // Dialog is Topmost=True + CenterScreen — appears above the overlay
                     var dlg = new TelegramAuthDialog(prompt);
                     dlg.Activate();
                     if (dlg.ShowDialog() == true) result = dlg.Answer;
