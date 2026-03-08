@@ -177,37 +177,30 @@ namespace FluxCore
         }
 
         /// <summary>
-        /// Disposes the current client (releasing file locks), deletes ALL telegram.* session
-        /// files, then reconnects from scratch. The WPF auth dialog will appear for re-auth.
+        /// Disposes the current client, deletes the session data file (telegram.dat),
+        /// then reconnects from scratch. The WPF auth dialog will appear for re-auth.
+        /// No GC tricks needed: the stream-based session approach has no file-lock issues.
         /// </summary>
         private async void TgResetSession_Click(object sender, RoutedEventArgs e)
         {
-            // 1. Tear down first so WTelegramClient releases its file handles
+            // 1. Tear down existing connection
             _telegram?.Dispose();
             _telegram        = null;
             _jarvis.Telegram = null;
             UpdateTelegramStatus();
 
-            // 2. Force GC to release any unmanaged file handles the old Client may hold,
-            //    then wait long enough for the OS to fully close them.
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            await Task.Delay(1200);
+            // 2. Brief pause to ensure Dispose has finished
+            await Task.Delay(300);
 
-            // 3. Delete every telegram-related file (session, partial writes, temp files)
+            // 3. Delete session data so next connect starts fresh (auth dialog will appear)
             try
             {
                 string davosDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos");
 
                 if (Directory.Exists(davosDir))
-                {
                     foreach (var file in Directory.GetFiles(davosDir, "telegram*"))
-                    {
-                        try { File.Delete(file); }
-                        catch { /* skip if still locked */ }
-                    }
-                }
+                        try { File.Delete(file); } catch { }
             }
             catch { }
 

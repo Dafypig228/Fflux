@@ -16,7 +16,11 @@ namespace FluxCore
     ///   1. Get api_id + api_hash from https://my.telegram.org
     ///   2. Set TelegramEnabled=true, TelegramApiId, TelegramApiHash in AppSettings
     ///   3. First run: prompts for phone → verification code → optional 2FA password
-    ///   4. Session saved to %APPDATA%\Davos\telegram.session — no re-auth after
+    ///   4. Session saved to %APPDATA%\Davos\telegram.dat — no re-auth after
+    ///
+    /// Session storage uses the WTelegramClient Stream constructor overload, which bypasses
+    /// the library's internal AES encryption of the session file (the source of the
+    /// "Specified key is not a valid size" CryptographicException in file mode).
     ///
     /// Messages are stored in MemoryService (semantic search) and DataLake (SQL).
     /// Context available via GetRecentMessages() for BuildDynamicContext.
@@ -24,8 +28,9 @@ namespace FluxCore
     public class TelegramService : IDisposable
     {
         private Client? _client;
-        private readonly string _sessionPath;
-        private readonly int _apiId;
+        private readonly string _davosDir;
+        private readonly string _sessionDataPath;   // telegram.dat — raw session bytes, no encryption
+        private readonly int    _apiId;
         private readonly string _apiHash;
 
         // In-memory ring buffer of recent messages
@@ -52,111 +57,54 @@ namespace FluxCore
 
         public TelegramService(int apiId, string apiHash)
         {
-            _apiId       = apiId;
-            _apiHash     = apiHash;
-            _sessionPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Davos", "telegram.session");
+            _apiId           = apiId;
+            _apiHash         = apiHash;
+            _davosDir        = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos");
+            _sessionDataPath = Path.Combine(_davosDir, "telegram.dat");
         }
 
         /// <summary>
-        /// Starts the Telegram client. Run in background — blocks on first-run auth.
-        /// On a corrupt/locked session file, automatically clears the file and retries once.
+        /// Starts the Telegram client using stream-based session storage.
+        /// Stream mode bypasses WTelegramClient's AES session-file encryption entirely,
+        /// so no CryptographicException can occur regardless of api_hash length.
+        /// Run in background — blocks on first-run auth.
         /// </summary>
         public async Task StartAsync()
         {
             StatusMessage = "Connecting…";
             try
             {
-                _client           = new Client(ConfigFunc);
+                // Build a self-persisting, unencrypted session stream.
+                // WTelegramClient reads/writes raw bytes to it — no AES key derivation from api_hash.
+                var stream = new AutoSaveStream(_sessionDataPath);
+                if (File.Exists(_sessionDataPath))
+                {
+                    byte[] saved = File.ReadAllBytes(_sessionDataPath);
+                    stream.Write(saved, 0, saved.Length);
+                    stream.Position = 0; // rewind so WTelegramClient can read the saved session
+                }
+
+                _client           = new Client(ConfigFunc, stream);
                 _client.OnUpdate += OnUpdate;
                 await _client.LoginUserIfNeeded();
                 IsConnected   = true;
                 StatusMessage = "Connected";
                 System.Diagnostics.Debug.WriteLine("[Telegram] Connected ✓");
             }
-            catch (Exception ex) when (IsSessionFileError(ex))
-            {
-                // The Client constructor opened the session file before throwing,
-                // so the file handle may still be held internally. Force release.
-                _client?.Dispose();
-                _client = null;
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-
-                DeleteSessionFiles();           // now the file should be unlocked
-                await Task.Delay(500);          // let the OS fully close the handle
-
-                System.Diagnostics.Debug.WriteLine("[Telegram] Corrupt session detected — auto-recovering…");
-                await StartInternalAsync();     // retry exactly once (no recursion)
-            }
             catch (Exception ex)
             {
                 _client?.Dispose();
                 _client = null;
                 SetError(ex);
             }
-        }
-
-        /// <summary>Single-attempt connect (used as the auto-recover retry).</summary>
-        private async Task StartInternalAsync()
-        {
-            try
-            {
-                _client           = new Client(ConfigFunc);
-                _client.OnUpdate += OnUpdate;
-                await _client.LoginUserIfNeeded();
-                IsConnected   = true;
-                StatusMessage = "Connected";
-                System.Diagnostics.Debug.WriteLine("[Telegram] Connected ✓ (after recovery)");
-            }
-            catch (Exception ex)
-            {
-                _client?.Dispose();
-                _client = null;
-                SetError(ex);
-            }
-        }
-
-        private static bool IsSessionFileError(Exception ex)
-        {
-            for (var e = ex; e != null; e = e.InnerException)
-            {
-                if (e.Message.Contains("session file", StringComparison.OrdinalIgnoreCase))
-                    return true;
-                if (e is System.Security.Cryptography.CryptographicException)
-                    return true;
-            }
-            return false;
-        }
-
-        private void DeleteSessionFiles()
-        {
-            try
-            {
-                string dir = Path.GetDirectoryName(_sessionPath)!;
-                if (Directory.Exists(dir))
-                    foreach (var f in Directory.GetFiles(dir, "telegram*"))
-                        try { File.Delete(f); } catch { }
-            }
-            catch { }
-        }
-
-        private void SetError(Exception ex)
-        {
-            var msgs = new System.Collections.Generic.List<string>();
-            for (var e = ex; e != null; e = e.InnerException) msgs.Add(e.Message);
-            string fullMsg = string.Join(" → ", msgs);
-            StatusMessage = $"Error: {fullMsg}";
-            System.Diagnostics.Debug.WriteLine($"[Telegram] Start error: {ex}");
-            OnError?.Invoke($"[Telegram error] {fullMsg}");
         }
 
         private string ConfigFunc(string what) => what switch
         {
             "api_id"            => _apiId.ToString(),
             "api_hash"          => _apiHash,
-            "session_pathname"  => _sessionPath,
+            // "session_pathname" is NOT used when a sessionStore Stream is passed to Client ctor
             "phone_number"      => PromptUser("Telegram phone (+1234567890): "),
             "verification_code" => PromptUser("Telegram verification code: "),
             "password"          => PromptUser("2FA password (Enter to skip): "),
@@ -169,6 +117,31 @@ namespace FluxCore
             // Debug fallback — only works if a console is attached
             Console.Write(prompt);
             return Console.ReadLine()?.Trim() ?? "";
+        }
+
+        private void SetError(Exception ex)
+        {
+            var msgs = new System.Collections.Generic.List<string>();
+            for (var e = ex; e != null; e = e.InnerException) msgs.Add(e.Message);
+            string fullMsg = string.Join(" → ", msgs);
+            StatusMessage = $"Error: {fullMsg}";
+            System.Diagnostics.Debug.WriteLine($"[Telegram] Start error: {ex}");
+            OnError?.Invoke($"[Telegram error] {fullMsg}");
+        }
+
+        /// <summary>
+        /// Deletes all telegram* files (telegram.dat, any legacy telegram.session files, etc.)
+        /// so the next StartAsync() begins a fresh session with the auth dialog.
+        /// </summary>
+        internal void DeleteSessionFiles()
+        {
+            try
+            {
+                if (Directory.Exists(_davosDir))
+                    foreach (var f in Directory.GetFiles(_davosDir, "telegram*"))
+                        try { File.Delete(f); } catch { }
+            }
+            catch { }
         }
 
         private async Task OnUpdate(IObject arg)
@@ -260,6 +233,37 @@ namespace FluxCore
             {
                 _client.OnUpdate -= OnUpdate;
                 _client.Dispose();
+            }
+        }
+
+        // =====================================================================
+        // AutoSaveStream — MemoryStream that persists to disk on every Flush().
+        // Passed to the WTelegramClient Client constructor so session bytes are
+        // stored as raw (unencrypted) data, bypassing the AES file encryption
+        // that caused "Specified key is not a valid size" on every startup.
+        // =====================================================================
+
+        private sealed class AutoSaveStream : MemoryStream
+        {
+            private readonly string _path;
+
+            public AutoSaveStream(string path) : base() { _path = path; }
+
+            public override void Flush()
+            {
+                base.Flush();
+                try { File.WriteAllBytes(_path, ToArray()); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Telegram] Session save failed: {ex.Message}");
+                }
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    try { File.WriteAllBytes(_path, ToArray()); } catch { }
+                base.Dispose(disposing);
             }
         }
     }
