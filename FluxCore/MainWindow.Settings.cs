@@ -154,7 +154,10 @@ namespace FluxCore
                 string result = "";
                 Dispatcher.Invoke(() =>
                 {
-                    var dlg = new TelegramAuthDialog(prompt) { Owner = this };
+                    LogMessage($"[Telegram] Auth prompt: {prompt}");
+                    // Dialog is Topmost=True + CenterScreen so it appears above the overlay
+                    var dlg = new TelegramAuthDialog(prompt);
+                    dlg.Activate();
                     if (dlg.ShowDialog() == true) result = dlg.Answer;
                 });
                 return result;
