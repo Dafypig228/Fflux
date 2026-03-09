@@ -142,10 +142,11 @@ namespace FluxCore
                 "api_id"            => $"api_id={_apiId}",
                 "api_hash"          => "api_hash=<masked>",
                 "session_key"       => "session_key=<masked>",
+                "server_address"    => "server_address (returning null → use default DCs)",
                 "phone_number"      => "phone_number (will show auth dialog)",
                 "verification_code" => "verification_code (will show auth dialog)",
                 "password"          => "password/2FA (will show auth dialog)",
-                _                   => $"key={what}"
+                _                   => $"key={what}=null"
             };
             Log($"[Telegram] ConfigFunc: {tag}");
 
@@ -153,12 +154,12 @@ namespace FluxCore
             {
                 "api_id"            => _apiId.ToString(),
                 "api_hash"          => _apiHash,
-                "session_key"       => _apiHash,   // AES key for session encryption; api_hash is 32 hex chars = 32 UTF-8 bytes = valid AES-256
+                "session_key"       => _apiHash,   // AES key for session encryption; api_hash = 32 hex chars = 32 UTF-8 bytes = valid AES-256
                 // session_pathname is never called when Stream is passed to ctor
                 "phone_number"      => PromptUser("Telegram phone (+1234567890): "),
                 "verification_code" => PromptUser("Telegram verification code: "),
                 "password"          => PromptUser("2FA password (Enter to skip): "),
-                _                   => ""
+                _                   => null!   // null = "use WTelegramClient default" for all other keys (server_address etc.)
             };
         }
 
