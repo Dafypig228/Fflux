@@ -141,6 +141,7 @@ namespace FluxCore
             {
                 "api_id"            => $"api_id={_apiId}",
                 "api_hash"          => "api_hash=<masked>",
+                "session_key"       => "session_key=<masked>",
                 "phone_number"      => "phone_number (will show auth dialog)",
                 "verification_code" => "verification_code (will show auth dialog)",
                 "password"          => "password/2FA (will show auth dialog)",
@@ -152,6 +153,7 @@ namespace FluxCore
             {
                 "api_id"            => _apiId.ToString(),
                 "api_hash"          => _apiHash,
+                "session_key"       => _apiHash,   // AES key for session encryption; api_hash is 32 hex chars = 32 UTF-8 bytes = valid AES-256
                 // session_pathname is never called when Stream is passed to ctor
                 "phone_number"      => PromptUser("Telegram phone (+1234567890): "),
                 "verification_code" => PromptUser("Telegram verification code: "),
