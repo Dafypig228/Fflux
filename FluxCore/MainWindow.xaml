@@ -233,6 +233,12 @@
                                 Click="TgResetSession_Click"
                                 ToolTip="Delete session file and re-authenticate"
                                 Foreground="#80A0B0"/>
+                        <Button x:Name="TgChooseChatsBtn" Content="⚙ Chats" DockPanel.Dock="Right"
+                                Style="{StaticResource CleanBtn}" FontSize="8" Padding="6,2" Margin="0,0,4,0"
+                                Click="TgChooseChats_Click"
+                                ToolTip="Choose which chats and groups to monitor"
+                                Foreground="#80C0A0"
+                                IsEnabled="False"/>
                         <TextBlock x:Name="TelegramStatus" Text="● Not configured" Foreground="#506060"
                                    FontSize="9" FontFamily="Consolas" VerticalAlignment="Center"/>
                     </DockPanel>

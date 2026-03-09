@@ -63,6 +63,8 @@ namespace FluxCore
         public bool TelegramEnabled { get; set; } = false;
         public int    TelegramApiId   { get; set; } = 0;
         public string TelegramApiHash { get; set; } = "";
+        /// <summary>Chat/user IDs to monitor. Empty list = all DMs and groups (no channels).</summary>
+        public System.Collections.Generic.List<long> TelegramChatIds { get; set; } = new();
         
         /// <summary>
         /// Load settings from disk, or return defaults if file doesn't exist.

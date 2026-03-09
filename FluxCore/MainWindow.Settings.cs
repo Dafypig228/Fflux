@@ -148,6 +148,10 @@ namespace FluxCore
             _telegram.Memory   = _memory;
             _jarvis.Telegram   = _telegram;
 
+            // Restore saved chat filter (empty = all DMs + groups, no channels)
+            if (_settings.TelegramChatIds?.Count > 0)
+                _telegram.AllowedChatIds = new System.Collections.Generic.HashSet<long>(_settings.TelegramChatIds);
+
             // Route WTelegramClient's own internal logs (level >= 2 = info/warning/error) to the Logs panel.
             // This reveals exactly what WTelegramClient is doing: DC selection, key exchange, auth state, etc.
             WTelegram.Helpers.Log = (level, msg) =>
@@ -245,6 +249,45 @@ namespace FluxCore
                 TelegramStatus.Foreground = new System.Windows.Media.SolidColorBrush(
                     System.Windows.Media.Color.FromRgb(0xFF, 0xAA, 0x00));
             }
+
+            // Enable the "⚙ Chats" button only while connected
+            if (TgChooseChatsBtn != null)
+                TgChooseChatsBtn.IsEnabled = _telegram?.IsConnected == true;
+        }
+
+        /// <summary>
+        /// Opens the chat picker dialog so the user can choose which chats Davos monitors.
+        /// Available only while Telegram is connected.
+        /// </summary>
+        private async void TgChooseChats_Click(object sender, RoutedEventArgs e)
+        {
+            if (_telegram == null || !_telegram.IsConnected) return;
+
+            TgChooseChatsBtn.IsEnabled = false;
+            LogMessage("[Telegram] Fetching chat list…");
+
+            var chats = await Task.Run(() => _telegram.GetAvailableChatsAsync());
+
+            TgChooseChatsBtn.IsEnabled = true;
+
+            if (chats.Count == 0)
+            {
+                LogMessage("[Telegram] No chats found.");
+                return;
+            }
+
+            var dlg = new TelegramChatPickerDialog(chats, _telegram.AllowedChatIds);
+            if (dlg.ShowDialog() != true) return;
+
+            // Apply and persist the selection
+            _telegram.AllowedChatIds   = dlg.SelectedIds;
+            _settings.TelegramChatIds  = dlg.SelectedIds.ToList();
+            _settings.Save();
+
+            string summary = dlg.SelectedIds.Count == 0
+                ? "all DMs and groups (no filter)"
+                : $"{dlg.SelectedIds.Count} chat(s) selected";
+            LogMessage($"[Telegram] Now monitoring: {summary}");
         }
 
         private void Btn_Minimize_Click(object sender, RoutedEventArgs e) => this.WindowState = WindowState.Minimized;

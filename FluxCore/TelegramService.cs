@@ -58,6 +58,15 @@ namespace FluxCore
         /// </summary>
         public Func<string, string>? AuthPrompt { get; set; }
 
+        /// <summary>
+        /// Peer IDs (user/chat/channel) to accept messages from.
+        /// Empty = accept all DMs and groups (default). Non-empty = only the listed IDs.
+        /// </summary>
+        public HashSet<long> AllowedChatIds { get; set; } = new();
+
+        /// <summary>Represents a single chat/DM/channel visible in the picker dialog.</summary>
+        public record TgChatInfo(long Id, string Name, string Type);
+
         public TelegramService(int apiId, string apiHash)
         {
             _apiId           = apiId;
@@ -217,12 +226,76 @@ namespace FluxCore
             }
         }
 
+        /// <summary>
+        /// Fetches all dialogs from Telegram and returns them as a list for the chat picker.
+        /// Returns empty list if not connected.
+        /// </summary>
+        public async Task<List<TgChatInfo>> GetAvailableChatsAsync()
+        {
+            if (_client == null || !IsConnected) return new();
+            try
+            {
+                var dialogs = await _client.Messages_GetAllDialogs();
+                var result  = new List<TgChatInfo>();
+                foreach (var dialog in dialogs.dialogs)
+                {
+                    long   id   = 0;
+                    string name = "";
+                    string type = "";
+                    switch (dialog.Peer)
+                    {
+                        case PeerUser pu:
+                            if (dialogs.users.TryGetValue(pu.user_id, out var u))
+                            {
+                                name = $"{u.first_name} {u.last_name}".Trim();
+                                if (string.IsNullOrEmpty(name)) name = u.username ?? $"User {pu.user_id}";
+                            }
+                            id = pu.user_id; type = "DM";
+                            break;
+                        case PeerChat pc:
+                            if (dialogs.chats.TryGetValue(pc.chat_id, out var gc)) name = gc.Title;
+                            id = pc.chat_id; type = "Group";
+                            break;
+                        case PeerChannel pch:
+                            if (dialogs.chats.TryGetValue(pch.channel_id, out var ch)) name = ch.Title;
+                            id = pch.channel_id; type = "Channel";
+                            break;
+                    }
+                    if (id != 0 && !string.IsNullOrEmpty(name))
+                        result.Add(new TgChatInfo(id, name, type));
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Log($"[Telegram] GetAvailableChatsAsync error: {ex.Message}");
+                return new();
+            }
+        }
+
         private Task HandleMessageAsync(TL.Message msg, Dictionary<long, User> users)
         {
             if (string.IsNullOrEmpty(msg.message)) return Task.CompletedTask;
 
-            // Skip broadcast channels (PeerChannel) — only DMs (PeerUser) and small groups (PeerChat)
-            if (msg.peer_id is PeerChannel) return Task.CompletedTask;
+            // Determine the peer ID so we can apply the chat filter
+            long peerId = msg.peer_id switch
+            {
+                PeerUser    pru  => pru.user_id,
+                PeerChat    prc  => prc.chat_id,
+                PeerChannel prch => prch.channel_id,
+                _                => 0
+            };
+
+            if (AllowedChatIds.Count > 0)
+            {
+                // Explicit filter active: only accept messages from selected chats
+                if (!AllowedChatIds.Contains(peerId)) return Task.CompletedTask;
+            }
+            else
+            {
+                // Default: skip broadcast channels (PeerChannel) — only DMs and small groups
+                if (msg.peer_id is PeerChannel) return Task.CompletedTask;
+            }
 
             // Resolve sender name
             string senderName = "Unknown";
