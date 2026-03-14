@@ -7,6 +7,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using Windows.Graphics.Imaging;
+using Windows.Media.Control;
 using Windows.Media.Ocr;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Linq;
@@ -492,5 +493,49 @@ namespace FluxCore
             }
             return sb.ToString();
         }
+
+        public MediaInfo? GetMediaInfo()
+        {
+            try
+            {
+                // Task.Run escapes the UI SynchronizationContext — prevents deadlock
+                return Task.Run(async () =>
+                {
+                    var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+                    var session = manager.GetCurrentSession();
+                    if (session == null) return null;
+
+                    var props = await session.TryGetMediaPropertiesAsync();
+                    if (string.IsNullOrEmpty(props.Title)) return null;
+
+                    var playback = session.GetPlaybackInfo();
+                    var timeline = session.GetTimelineProperties();
+                    bool isPlaying = playback?.PlaybackStatus ==
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+
+                    return new MediaInfo(
+                        Title:     props.Title,
+                        Artist:    props.Artist ?? "",
+                        Album:     props.AlbumTitle ?? "",
+                        IsPlaying: isPlaying,
+                        Position:  timeline?.Position ?? TimeSpan.Zero,
+                        Duration:  timeline?.EndTime  ?? TimeSpan.Zero,
+                        AppName:   session.SourceAppUserModelId ?? ""
+                    );
+                }).GetAwaiter().GetResult();
+            }
+            catch { /* No media active or WinRT unavailable */ }
+            return null;
+        }
     }
 }
+
+public record MediaInfo(
+    string Title,
+    string Artist,
+    string Album,
+    bool IsPlaying,
+    TimeSpan Position,
+    TimeSpan Duration,
+    string AppName
+);

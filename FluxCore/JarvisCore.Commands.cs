@@ -34,11 +34,18 @@ namespace FluxCore
 
                     lastError = result.Message;
 
-                    // Safety stop — refocus window
+                    // Safety stop handling
                     if (result.Message.Contains("SAFETY STOP"))
                     {
+                        if (result.Message.Contains("Davos's own window") &&
+                            cmdType.ToUpper() != "SCROLL")
+                        {
+                            // Hard stop for CLICK/TYPE/KEYS — would corrupt Davos UI. Do not retry.
+                            return new ExecutionOutcome(false, "SAFETY STOP: Cannot interact with Davos UI.");
+                        }
+                        // For SCROLL or transient wrong-focus — refocus expected app and retry
                         await _executor.OpenApp(GetExpectedApp(cmdType, cmdArg));
-                        await Task.Delay(100);
+                        await Task.Delay(200);
                         continue;
                     }
 
@@ -163,10 +170,10 @@ namespace FluxCore
                     // Safety handled by confidence gate (DestructiveCommands set + actionConfidence < 0.7)
                     return await _codeRunner.RunPowerShellAsync(cmdArg);
 
-                case "RESPOND":
-                    _logToUI($"[message] {cmdArg}");
-                    OnResponse?.Invoke(cmdArg);
-                    return new ExecutionResult(true, $"Responded to user: {cmdArg.Substring(0, Math.Min(50, cmdArg.Length))}...");
+                case "REJECT":
+                    // Task is outside JarvisCore's domain. This case is a fallback —
+                    // REJECT is normally caught at the loop level before command dispatch.
+                    return new ExecutionResult(false, $"REJECTED: {cmdArg}");
 
                 case "LOG":
                     // LOG is informative - keep it in Neuro-Hud only

@@ -198,6 +198,7 @@ namespace FluxCore
                 {
                     FileName = executable,
                     Arguments = arguments,
+                    WorkingDirectory = Path.GetTempPath(),
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,

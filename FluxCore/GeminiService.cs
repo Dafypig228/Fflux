@@ -278,6 +278,7 @@ namespace FluxCore
 
                 System.Diagnostics.Debug.WriteLine(
                     $"[GEMINI] Unexpected response: {responseStr.Substring(0, Math.Min(300, responseStr.Length))}");
+                ChatLogger.LogError("Gemini/unexpected", responseStr);
                 return "No response from AI.";
             }
             catch (TaskCanceledException)
@@ -293,8 +294,22 @@ namespace FluxCore
         // ==========================================
         // 4. EMBEDDINGS
         // ==========================================
+        private LocalEmbeddingService? _localEmbedder;
+
+        /// <summary>
+        /// Sets the local ONNX embedder. When ready, it takes priority over the Gemini API,
+        /// keeping all passive sensor data offline and free.
+        /// </summary>
+        public void SetLocalEmbedder(LocalEmbeddingService embedder)
+            => _localEmbedder = embedder;
+
         public async Task<float[]> GetEmbeddingAsync(string text)
         {
+            // Use local ONNX model when available — private, free, 384-dim
+            if (_localEmbedder?.IsReady == true)
+                return await Task.FromResult(_localEmbedder.GetEmbedding(text));
+
+
             var payload = new
             {
                 model = "models/text-embedding-004",
@@ -379,5 +394,236 @@ namespace FluxCore
             };
             return await SendPayload(contents, null, temperature);
         }
+
+        // ==========================================
+        // 6. COMMITMENT TOOL CALLING
+        // ==========================================
+
+        /// <summary>
+        /// Single LLM call that handles conversation AND exposes native Gemini function-calling
+        /// tools for scheduling, PC task execution, and mid-task context injection.
+        ///
+        /// Gemini AUTO mode may return BOTH a text part AND functionCall parts in the SAME
+        /// response. We iterate ALL parts so nothing is lost:
+        ///   • text                → what Davos says to the user right now
+        ///   • commitment_add      → backend signal to schedule a deferred action
+        ///   • execute_pc_task     → backend signal to launch JarvisCore automation
+        ///   • inject_task_context → backend signal to inject context into running task
+        /// </summary>
+        public async Task<(string Text, CommitmentCall? Commitment, PcTaskCall? PcTask, InjectCtxCall? InjectCtx)>
+            ChatWithAgentToolsAsync(
+                List<ChatMessage> history,
+                string userInput,
+                string systemInstruction,
+                float temperature,
+                bool hasActiveTasks = false)
+        {
+            // Build contents array identical to ChatWithHistory
+            var contents = new List<object>();
+            foreach (var msg in history)
+            {
+                string role = msg.IsUser ? "user" : "model";
+                contents.Add(new { role, parts = new[] { new { text = msg.Text ?? "" } } });
+            }
+            contents.Add(new { role = "user", parts = new[] { new { text = userInput } } });
+
+            // Tool declarations
+            object commitmentDecl = new
+            {
+                name        = "commitment_add",
+                description = "Schedule a deferred action OR immediately deliver a message to the user. " +
+                              "ALWAYS use this for: anything with a time delay ('in 10 seconds', 'in 5 minutes', " +
+                              "'after X'), any request to 'write me', 'message me', 'remind me', 'contact me', " +
+                              "'send me something'. This is handled entirely inside Davos — zero Windows UI needed.",
+                parameters  = new
+                {
+                    type       = "object",
+                    properties = new
+                    {
+                        delay_seconds = new
+                        {
+                            type        = "integer",
+                            description = "Seconds to wait before executing. Use 0 for immediate delivery."
+                        },
+                        description = new
+                        {
+                            type        = "string",
+                            description = "Short imperative description of the action to execute"
+                        }
+                    },
+                    required = new[] { "delay_seconds", "description" }
+                }
+            };
+
+            object pcTaskDecl = new
+            {
+                name        = "execute_pc_task",
+                description = "Execute a task requiring DIRECT WINDOWS UI CONTROL or SHELL SCRIPTING. " +
+                              "Use ONLY for: opening apps, clicking UI elements, typing, scrolling, " +
+                              "running PowerShell/Python scripts, managing files on disk, browser navigation. " +
+                              "NEVER use for: scheduling, timers, reminders, messaging the user, " +
+                              "or anything involving Telegram — those are commitment_add.",
+                parameters  = new
+                {
+                    type       = "object",
+                    properties = new
+                    {
+                        description = new
+                        {
+                            type        = "string",
+                            description = "A precise, imperative PC automation directive. Translate the user's " +
+                                          "intent into clean steps: what app, what actions, what goal. " +
+                                          "Strip conversational filler. Never include 'tell me when done' or 'let me know'."
+                        }
+                    },
+                    required = new[] { "description" }
+                }
+            };
+
+            var functionDecls = new List<object> { commitmentDecl, pcTaskDecl };
+
+            // inject_task_context is only offered when a task is actually running
+            if (hasActiveTasks)
+            {
+                functionDecls.Add(new
+                {
+                    name        = "inject_task_context",
+                    description = "Provide new information or a correction to the currently running task. " +
+                                  "Use when the user is clarifying, correcting, or adding context for a task " +
+                                  "that is already in progress.",
+                    parameters  = new
+                    {
+                        type       = "object",
+                        properties = new
+                        {
+                            text = new
+                            {
+                                type        = "string",
+                                description = "The update or correction to inject into the running task"
+                            }
+                        },
+                        required = new[] { "text" }
+                    }
+                });
+            }
+
+            var safetySettings = new[]
+            {
+                new { category = "HARM_CATEGORY_HARASSMENT",        threshold = "BLOCK_NONE" },
+                new { category = "HARM_CATEGORY_HATE_SPEECH",       threshold = "BLOCK_NONE" },
+                new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_NONE" },
+                new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_NONE" }
+            };
+
+            object payload = new
+            {
+                system_instruction = new { parts = new[] { new { text = systemInstruction } } },
+                contents,
+                tools            = new[] { new { functionDeclarations = functionDecls.ToArray() } },
+                tool_config      = new { functionCallingConfig = new { mode = "AUTO" } },
+                generationConfig = new { temperature = (double)temperature, maxOutputTokens = 8192 },
+                safetySettings
+            };
+
+            var json    = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            string url  = $"{Endpoint}?key={_apiKey}";
+
+            try
+            {
+                var response    = await _httpClient.PostAsync(url, content);
+                var responseStr = await response.Content.ReadAsStringAsync();
+
+                // Rate-limit retry
+                if ((int)response.StatusCode == 429 || (int)response.StatusCode == 503)
+                {
+                    for (int retry = 0; retry < 3; retry++)
+                    {
+                        await Task.Delay((int)Math.Pow(2, retry) * 1000);
+                        content  = new StringContent(json, Encoding.UTF8, "application/json");
+                        response = await _httpClient.PostAsync(url, content);
+                        responseStr = await response.Content.ReadAsStringAsync();
+                        if (response.IsSuccessStatusCode) break;
+                        if ((int)response.StatusCode != 429 && (int)response.StatusCode != 503) break;
+                    }
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    string err = responseStr.Substring(0, Math.Min(200, responseStr.Length));
+                    return ($"⚠️ Error {response.StatusCode}: {err}", null, null, null);
+                }
+
+                using var doc = JsonDocument.Parse(responseStr);
+                if (!doc.RootElement.TryGetProperty("candidates", out var candidates) ||
+                    candidates.GetArrayLength() == 0)
+                {
+                    ChatLogger.LogError("Gemini/no-candidates", responseStr);
+                    return ("No response from AI.", null, null, null);
+                }
+
+                var first = candidates[0];
+                if (!first.TryGetProperty("content", out var contentEl) ||
+                    !contentEl.TryGetProperty("parts", out var parts))
+                {
+                    ChatLogger.LogError("Gemini/no-parts", responseStr);
+                    return ("No response from AI.", null, null, null);
+                }
+
+                // Iterate ALL parts — Gemini AUTO mode can return text + functionCall(s) together
+                var textBuilder = new StringBuilder();
+                CommitmentCall? commitment = null;
+                PcTaskCall?     pcTask     = null;
+                InjectCtxCall?  injectCtx  = null;
+
+                foreach (var part in parts.EnumerateArray())
+                {
+                    if (part.TryGetProperty("text", out var textEl))
+                    {
+                        textBuilder.Append(textEl.GetString() ?? "");
+                    }
+                    else if (part.TryGetProperty("functionCall", out var fc) &&
+                             fc.TryGetProperty("name", out var nameEl) &&
+                             fc.TryGetProperty("args", out var args))
+                    {
+                        switch (nameEl.GetString())
+                        {
+                            case "commitment_add":
+                                int    delaySec = args.TryGetProperty("delay_seconds", out var d)   ? d.GetInt32()        : 60;
+                                string desc     = args.TryGetProperty("description",   out var dsc)  ? dsc.GetString() ?? "" : "";
+                                commitment = new CommitmentCall(delaySec, desc);
+                                break;
+
+                            case "execute_pc_task":
+                                string taskDesc = args.TryGetProperty("description", out var td) ? td.GetString() ?? "" : "";
+                                pcTask = new PcTaskCall(taskDesc);
+                                break;
+
+                            case "inject_task_context":
+                                string ctxText = args.TryGetProperty("text", out var ct2) ? ct2.GetString() ?? "" : "";
+                                injectCtx = new InjectCtxCall(ctxText);
+                                break;
+                        }
+                    }
+                }
+
+                return (textBuilder.ToString().Trim(), commitment, pcTask, injectCtx);
+            }
+            catch (TaskCanceledException)
+            {
+                return ("⚠️ Request timed out.", null, null, null);
+            }
+            catch (Exception ex)
+            {
+                return ($"Exception: {ex.Message}", null, null, null);
+            }
+        }
     }
+
+    /// <summary>Parsed output from Gemini's commitment_add function call.</summary>
+    public record CommitmentCall(int DelaySeconds, string Description);
+    /// <summary>Parsed output from Gemini's execute_pc_task function call.</summary>
+    public record PcTaskCall(string Description);
+    /// <summary>Parsed output from Gemini's inject_task_context function call.</summary>
+    public record InjectCtxCall(string Text);
 }

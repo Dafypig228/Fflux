@@ -31,10 +31,24 @@ namespace FluxCore
         private readonly Channel<BrainRequest> _requestQueue;
         private readonly CancellationTokenSource _cts = new();
         private Task? _processLoopTask;
+        private Task? _agentLoopTask;
+
+        // --- Commitment scheduling ---
+        private CommitmentStore? _commitments;
+
+        // --- Stop fast-path word set ---
+        private static readonly HashSet<string> _stopWords = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "stop", "cancel", "abort", "halt", "kill",
+            "стоп", "отмени", "останови", "прекрати", "отменить"
+        };
 
         // --- Swarm Infrastructure ---
         private readonly SwarmOrchestrator _swarm;
         private readonly InMemoryMessageBus _messageBus;
+
+        // --- Task Warning Debounce ---
+        private DateTime _lastTaskWarningAt = DateTime.MinValue;
 
         // --- Concurrent Task Tracking ---
         private readonly ConcurrentDictionary<string, RunningTask> _runningTasks = new();
@@ -59,6 +73,13 @@ namespace FluxCore
         /// <summary>DataLake for task persistence. Set from MainWindow after init.</summary>
         public DataLakeService? DataLake { get; set; }
 
+        /// <summary>
+        /// When set, RAG context is fetched from this engine and injected into every chat turn.
+        /// Set from MainWindow after _memoryEngine is created.
+        /// </summary>
+        private MemoryEngine? _memoryEngine;
+        public void SetMemoryEngine(MemoryEngine engine) => _memoryEngine = engine;
+
         public FluxBrain(
             ILLMService llm,
             JarvisCore jarvis,
@@ -69,6 +90,28 @@ namespace FluxCore
             _llm = llm;
             _jarvis = jarvis;
             _memory = memory;
+
+            _jarvis.OnTaskWarning += alert =>
+            {
+                // Debounce: one alert per 90s max (stall + circuit-breaker can fire in sequence)
+                if ((DateTime.UtcNow - _lastTaskWarningAt).TotalSeconds < 90) return;
+                _lastTaskWarningAt = DateTime.UtcNow;
+
+                // Pause JarvisCore BEFORE asking — so it doesn't keep executing while we wait
+                _jarvis.PauseForUserInput();
+
+                string systemPrompt = $"""
+[SYSTEM ALERT: Your background PC execution worker just reported a problem: {alert}].
+You are operating on the user's personal computer and you just hit a roadblock or failure loop.
+
+CRITICAL RULES FOR THIS RESPONSE:
+1. Tell the user exactly what is stuck or failing in natural language.
+2. Propose what you THINK the next step should be, but explicitly ASK FOR PERMISSION or guidance before you proceed.
+3. Never guess blindly if you are unsure. Safety is your top priority.
+4. Remind the user they can just reply to this message to give you new instructions.
+""";
+                _ = SubmitAutonomousAsync(systemPrompt);
+            };
             _hippocampus = hippocampus;
             _cortex = cortex;
 
@@ -91,15 +134,32 @@ namespace FluxCore
         /// <summary>Inject CoreMemoryService after construction (set before Start()).</summary>
         public void SetCoreMemory(CoreMemoryService coreMemory) => _coreMemory = coreMemory;
 
+        /// <summary>Inject CommitmentStore for deferred commitment scheduling.</summary>
+        public void SetCommitmentStore(CommitmentStore store) => _commitments = store;
+
+        /// <summary>
+        /// Execute an autonomous (sandboxed) research task via the Swarm.
+        /// Used by InnerVoiceService — no screen access, web-read only, 5-min hard timeout.
+        /// The caller is responsible for adding safety constraints to the goal string.
+        /// </summary>
+        public Task<Swarm.SwarmExecutionResult> ExecuteAutonomousResearchAsync(
+            string goal,
+            System.Threading.CancellationToken ct = default)
+        {
+            string workDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return _swarm.ExecuteGoalAsync(goal, workDir, ct);
+        }
+
         /// <summary>Start the brain's processing loop. Call once at startup.</summary>
         public void Start()
         {
             _processLoopTask = Task.Run(() => ProcessLoopAsync(_cts.Token));
+            _agentLoopTask   = Task.Run(() => RunAgentLoopAsync(_cts.Token));
         }
 
         /// <summary>
-        /// Submit a request. NEVER blocks, NEVER drops.
-        /// Replaces the old _isProcessing boolean gate.
+        /// Submit a user request. NEVER blocks, NEVER drops.
+        /// Always echoes the message to UI immediately.
         /// </summary>
         public async Task SubmitAsync(string userText, RequestPriority priority = RequestPriority.Normal)
         {
@@ -115,6 +175,50 @@ namespace FluxCore
             };
 
             await _requestQueue.Writer.WriteAsync(request);
+        }
+
+        /// <summary>
+        /// Submit an autonomous (commitment-fired) request without echoing to UI.
+        /// Called by RunAgentLoopAsync when a commitment becomes due.
+        /// </summary>
+        public async Task SubmitAutonomousAsync(string text, string? contextSnapshot = null)
+        {
+            await _requestQueue.Writer.WriteAsync(new BrainRequest
+            {
+                Id               = Guid.NewGuid().ToString("N")[..8],
+                Text             = text,
+                Priority         = RequestPriority.Normal,
+                Timestamp        = DateTime.UtcNow,
+                IsAutonomous     = true,
+                CommitmentContext = contextSnapshot
+            });
+        }
+
+        /// <summary>
+        /// Agent loop: polls CommitmentStore every second for due commitments.
+        /// Uses PeriodicTimer so overlapping ticks are impossible.
+        /// </summary>
+        private async Task RunAgentLoopAsync(CancellationToken ct)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                try
+                {
+                    if (_commitments == null) continue;
+                    var due = _commitments.GetDue(); // atomic read + mark Executing
+                    foreach (var c in due)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[AgentLoop] Firing commitment: {c.Description}");
+                        await SubmitAutonomousAsync(c.Description, c.ContextSnapshot);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[AgentLoop] Error: {ex.Message}");
+                    // Never rethrow — loop must survive individual failures
+                }
+            }
         }
 
         /// <summary>The main processing loop. Runs forever on a background thread.</summary>
@@ -143,206 +247,37 @@ namespace FluxCore
             }
         }
 
-        /// <summary>Process one request: classify then route.</summary>
+        /// <summary>
+        /// Process one request. Gemini's tool calls decide routing — no separate classifier.
+        /// The stop fast-path is the only pre-LLM check.
+        /// </summary>
         private async Task ProcessSingleRequestAsync(BrainRequest request, CancellationToken ct)
         {
-            // Step 1: FAST CLASSIFICATION via Gemini (no screenshot, minimal prompt)
-            var intent = await ClassifyIntentAsync(request.Text, ct);
-
-            // CONSENSUS VOTING: If confidence is low on a non-chat result, verify with 2 more calls
-            if (intent.Confidence < 0.8 && intent.Type != IntentType.Chat)
+            // Fast-path: stop commands must be instant, before any LLM call.
+            // Only fires when a task is actually running.
+            if (!request.IsAutonomous && IsStopCommand(request.Text) && HasActiveTask())
             {
-                System.Diagnostics.Debug.WriteLine($"[BRAIN] Low confidence ({intent.Confidence:F2}) — running consensus vote");
-                var voteTasks = new[] {
-                    ClassifyIntentAsync(request.Text, ct),
-                    ClassifyIntentAsync(request.Text, ct)
-                };
-                var voteResults = await Task.WhenAll(voteTasks);
-
-                // Count votes: original + 2 new = 3 total
-                var allVotes = new[] { intent }.Concat(voteResults).ToList();
-                var majority = allVotes.GroupBy(v => v.Type)
-                    .OrderByDescending(g => g.Count())
-                    .ThenByDescending(g => g.Max(v => v.Confidence))
-                    .First();
-
-                var winner = majority.OrderByDescending(v => v.Confidence).First();
-                System.Diagnostics.Debug.WriteLine($"[BRAIN] Consensus: {string.Join(",", allVotes.Select(v => v.Type))} → {winner.Type}");
-                intent = winner;
+                await HandleStopTaskAsync(request.Text, ct);
+                return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[BRAIN] Intent: {intent.Type} (conf: {intent.Confidence:F2}) — {intent.Summary}");
-
-            // CONFIDENCE GATE: uncertain PC_TASK → ask user before executing
-            if (intent.Type == IntentType.PcTask && intent.Confidence >= 0.6 && intent.Confidence < 0.8
-                && OnConfirmationNeeded != null)
-            {
-                bool confirmed = await OnConfirmationNeeded(
-                    $"I think you want me to: {intent.Summary}\nShould I proceed?");
-                if (!confirmed)
-                {
-                    intent.Type = IntentType.Chat;
-                    System.Diagnostics.Debug.WriteLine("[BRAIN] User rejected PC_TASK → Chat");
-                }
-            }
-
-            // Step 2: ROUTE based on classification
-            switch (intent.Type)
-            {
-                case IntentType.Chat:
-                    await HandleChatAsync(request, intent, ct);
-                    break;
-
-                case IntentType.PcTask:
-                    await HandlePcTaskAsync(request, intent, ct);
-                    break;
-
-                case IntentType.TaskQuery:
-                    await HandleTaskQueryAsync(request, intent, ct);
-                    break;
-
-                case IntentType.MultiTask:
-                    await HandleMultiTaskAsync(request, intent, ct);
-                    break;
-
-                case IntentType.SelfCoding:
-                    OnMessage?.Invoke("Self-coding is currently disabled.", false);
-                    break;
-            }
-        }
-
-        // ===================================================================
-        // CLASSIFICATION
-        // ===================================================================
-
-        /// <summary>
-        /// Uses Gemini with a minimal prompt (NO screenshot!) to classify intent.
-        /// Fully dynamic — NO keyword arrays. Gemini decides everything.
-        /// </summary>
-        private async Task<ClassifiedIntent> ClassifyIntentAsync(string userText, CancellationToken ct)
-        {
-            // Build minimal context: what tasks are running?
-            string runningTasksSummary = _runningTasks.IsEmpty
-                ? "None"
-                : string.Join("; ", _runningTasks.Values
-                    .Where(t => !t.CompletedAt.HasValue)
-                    .Select(t => $"[{t.Id}] {t.Description} ({t.Status})"));
-
-            string classifierPrompt = $@"You are a fast intent classifier for an AI assistant that controls Windows.
-
-RUNNING TASKS: {runningTasksSummary}
-
-USER SAYS: ""{userText}""
-
-Classify into EXACTLY ONE category:
-CHAT - Greeting, casual conversation, general knowledge question, joke, opinion, asking about the AI itself. Things you can answer from memory WITHOUT touching the computer.
-PC_TASK - Wants you to DO something on the computer: open/close apps, click, type, browse web, move/create/delete files, write code, create programs/games/scripts, run commands, check screen, ANY interaction with the PC or filesystem.
-TASK_QUERY - Asking about a currently running task (status, progress, what's happening, is it done)
-MULTI_TASK - Complex goal requiring multiple PARALLEL subtasks that should run simultaneously
-
-KEY RULES:
-- If answering REQUIRES looking at an app, checking the screen, or accessing any program → PC_TASK
-- If the user wants ANYTHING created, built, coded, written to disk → PC_TASK
-- If in doubt between CHAT and PC_TASK → choose PC_TASK (safer)
-
-EXAMPLES:
-""привет"" → CHAT
-""who are you?"" → CHAT
-""what's 2+2?"" → CHAT
-""tell me a joke"" → CHAT
-""open notepad"" → PC_TASK
-""make a snake game"" → PC_TASK
-""write a Python script"" → PC_TASK
-""create a file on desktop"" → PC_TASK
-""build a calculator app"" → PC_TASK
-""organize my files"" → PC_TASK
-""what's on my screen?"" → PC_TASK
-""check my Instagram DMs"" → PC_TASK
-""download this file"" → PC_TASK
-""run pip install pygame"" → PC_TASK
-""how's the notepad task going?"" → TASK_QUERY
-
-Respond in EXACTLY this format (3 lines, nothing else):
-INTENT: CHAT|PC_TASK|TASK_QUERY|MULTI_TASK
-CONFIDENCE: 0.95
-SUMMARY: One sentence describing what user wants";
-
-            try
-            {
-                string response = await _llm.GenerateText(classifierPrompt, 0.1f);
-                return ParseClassification(response, userText);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[BRAIN] Classifier error: {ex.Message}");
-                // On error, default to Chat (safe fallback — never produce commands by mistake)
-                return new ClassifiedIntent
-                {
-                    OriginalText = userText,
-                    Type = IntentType.Chat,
-                    Confidence = 0.5,
-                    Summary = userText
-                };
-            }
-        }
-
-        private ClassifiedIntent ParseClassification(string response, string originalText)
-        {
-            var intent = new ClassifiedIntent
-            {
-                OriginalText = originalText,
-                Type = IntentType.Chat,   // safe default
-                Confidence = 0.5,
-                Summary = originalText
-            };
-
-            foreach (var line in response.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var trimmed = line.Trim();
-
-                if (trimmed.StartsWith("INTENT:", StringComparison.OrdinalIgnoreCase))
-                {
-                    var value = trimmed.Substring(7).Trim().ToUpper();
-                    intent.Type = value switch
-                    {
-                        "CHAT" => IntentType.Chat,
-                        "PC_TASK" => IntentType.PcTask,
-                        "TASK_QUERY" => IntentType.TaskQuery,
-                        "MULTI_TASK" => IntentType.MultiTask,
-                        "SELF_CODING" => IntentType.SelfCoding,
-                        _ => IntentType.Chat
-                    };
-                }
-                else if (trimmed.StartsWith("CONFIDENCE:", StringComparison.OrdinalIgnoreCase))
-                {
-                    var confStr = trimmed.Substring(11).Trim();
-                    if (double.TryParse(confStr, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var conf))
-                        intent.Confidence = conf;
-                }
-                else if (trimmed.StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase))
-                {
-                    intent.Summary = trimmed.Substring(8).Trim();
-                }
-            }
-
-            // SELF-VERIFICATION: Low confidence on non-chat → default to Chat (safe)
-            // Phase 2 will add consensus voting (3 calls, majority wins)
-            if (intent.Confidence < 0.7 && intent.Type != IntentType.Chat)
-            {
-                System.Diagnostics.Debug.WriteLine($"[BRAIN] Low confidence ({intent.Confidence:F2}) on {intent.Type}, falling back to Chat");
-                intent.Type = IntentType.Chat;
-            }
-
-            return intent;
+            // Single LLM call — Gemini's tool choice decides what happens next.
+            await HandleChatAsync(request, ct);
         }
 
         // ===================================================================
         // HANDLERS
         // ===================================================================
 
-        /// <summary>Handle pure conversation — no screenshot, no commands, no JARVIS.</summary>
-        private async Task HandleChatAsync(BrainRequest request, ClassifiedIntent intent, CancellationToken ct)
+        /// <summary>
+        /// Universal entry point for all non-stop requests.
+        /// Calls ChatWithAgentToolsAsync — Gemini's tool calls decide what happens:
+        ///   execute_pc_task      → launch JarvisCore
+        ///   commitment_add       → schedule a deferred action
+        ///   inject_task_context  → forward context to running task
+        ///   (no tool call)       → normal conversational reply
+        /// </summary>
+        private async Task HandleChatAsync(BrainRequest request, CancellationToken ct)
         {
             OnStatusChanged?.Invoke("Chatting...");
 
@@ -394,12 +329,17 @@ YOUR MEMORY ARCHITECTURE:
   SemanticMemory → vector search across everything (davos_memory.db)
   Hippocampus  → lessons from past failures (knowledge.json)
 
-YOUR ACTION CAPABILITIES (use only when asked TO DO something):
+YOUR ACTION CAPABILITIES:
   Full Windows control: click, type, keyboard, scroll, open apps
   PowerShell / Python / Node.js / CMD execution
   File operations: read, write, move, copy, delete, search
   Browser automation: navigate, interact, extract content
   Screen vision: OCR, UI element detection, active window
+
+⚠ NEVER CLAIM YOU CAN'T KNOW SOMETHING ABOUT THIS PC:
+  Questions about current PC state — what's playing, what's open, what's on screen,
+  what process is running — are ALWAYS tasks. Use execute_pc_task to find out.
+  You have PowerShell, OCR, process listing. ""I don't have access"" is NEVER a valid answer.
 </self>
 RULES:
 - NEVER output [[COMMAND:...]] syntax — that's for task mode only
@@ -413,29 +353,124 @@ SECURITY:
             // Get conversation history for context
             var history = await GetHistorySnapshotAsync();
 
-            // Prepend live passive context (telegram, tasks, clipboard) to user message
-            string userMsgWithContext = BuildChatContext() + request.Text;
+            // Fetch RAG context for this specific query (semantic + graph + data lake)
+            string ragBlock = "";
+            if (_memoryEngine != null)
+            {
+                try { ragBlock = await _memoryEngine.RetrieveAsync(request.Text); }
+                catch (Exception ex) {
+                    System.Diagnostics.Debug.WriteLine($"[RAG] Chat retrieval failed: {ex.Message}");
+                }
+            }
 
-            // Call Gemini with CLEAN prompt (no screenshot, no command format!)
-            // System instruction is now a native top-level field in the Gemini API payload
-            string response = await _llm.ChatWithHistory(
-                history,
-                userMsgWithContext, // user's actual message + passive context prefix
-                "",                 // no screenshot for chat
-                "",                 // activeApp — not needed (system_instruction handles identity)
-                "",                 // memories
-                chatSystemPrompt,   // system instruction override → goes into system_instruction field
-                0.7f                // higher temperature for natural chat
-            );
+            // Inject commitment context when firing an autonomous request
+            if (request.IsAutonomous && !string.IsNullOrEmpty(request.CommitmentContext))
+            {
+                chatSystemPrompt += $"""
+
+[AUTONOMOUS COMMITMENT RESUMED]
+You previously made a commitment to the user. Context from when you made it:
+{request.CommitmentContext}
+Execute the commitment naturally. Do not explain you're on a schedule — just do it.
+""";
+            }
+
+            // Prepend live passive context (telegram, tasks, clipboard) + RAG to user message
+            string ragPrefix = string.IsNullOrEmpty(ragBlock) ? "" :
+                $"<rag_memory>\n{ragBlock[..Math.Min(ragBlock.Length, 2500)]}\n</rag_memory>\n\n";
+            string userMsgWithContext = BuildChatContext() + ragPrefix + request.Text;
+
+            string response;
+
+            if (_llm is GeminiService gemini)
+            {
+                var (text, commitment, pcTask, injectCtx) = await gemini.ChatWithAgentToolsAsync(
+                    history, userMsgWithContext, chatSystemPrompt, 0.7f,
+                    hasActiveTasks: HasActiveTask());
+
+                // Tool: inject_task_context — forward correction to the running task
+                if (injectCtx != null)
+                {
+                    _jarvis.InjectMidTaskContext(injectCtx.Text);
+                    _jarvis.ResumeFromUserInput(); // unblock paused task if waiting for guidance
+                    string ack = string.IsNullOrWhiteSpace(text)
+                        ? "Got it, adjusting."
+                        : CleanConversationalResponse(text);
+                    OnMessage?.Invoke(ack, false);
+                    return;
+                }
+
+                // Tool: execute_pc_task — launch JarvisCore automation
+                if (pcTask != null)
+                {
+                    // Show any accompanying text first (LLM may say "On it!" or explain what it's doing)
+                    if (!string.IsNullOrWhiteSpace(text))
+                        OnMessage?.Invoke(CleanConversationalResponse(text), false);
+
+                    var syntheticIntent = new ClassifiedIntent
+                    {
+                        Type         = IntentType.PcTask,
+                        Summary      = pcTask.Description,
+                        Confidence   = 1.0,
+                        OriginalText = request.Text
+                    };
+                    await HandlePcTaskAsync(request, syntheticIntent, ct);
+                    return;
+                }
+
+                // Tool: commitment_add — schedule a deferred action
+                if (commitment != null && _commitments != null)
+                {
+                    string snapshot = BuildContextSnapshot(request, history);
+                    _commitments.Add(
+                        TimeSpan.FromSeconds(commitment.DelaySeconds),
+                        commitment.Description,
+                        request.Text,
+                        snapshot);
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Brain] Commitment added: '{commitment.Description}' in {commitment.DelaySeconds}s");
+                }
+
+                response = string.IsNullOrWhiteSpace(text) ? "..." : text;
+            }
+            else
+            {
+                // Fallback: ModelRouter / local model — no function calling
+                response = await _llm.ChatWithHistory(
+                    history,
+                    userMsgWithContext,
+                    "", "", "",
+                    chatSystemPrompt,
+                    0.7f);
+            }
 
             // Clean up any accidental command markers (defense in depth)
             response = CleanConversationalResponse(response);
 
             // Add BOTH user message and response to history AFTER the API call
-            // (user message was NOT in history during ChatWithHistory — avoids duplicate)
             await AddToHistoryAsync(request.Text, true);
             await AddToHistoryAsync(response, false);
             OnMessage?.Invoke(response, false);
+
+            // Persist chat turns to DataLake (source: "chat") + human-readable daily log
+            DataLake?.Write("chat", request.Text,  new { role = "user" });
+            DataLake?.Write("chat", response,       new { role = "assistant" });
+            ChatLogger.Log(request.Text, isUser: true);
+            ChatLogger.Log(response,     isUser: false);
+
+            // Autonomous commitment fired → also deliver via Telegram (user isn't watching the UI)
+            if (request.IsAutonomous && _jarvis.Telegram != null)
+            {
+                string telegramText = response;
+                _ = Task.Run(async () =>
+                {
+                    try { await _jarvis.Telegram.SendMessageAsync(telegramText); }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[Brain] Autonomous Telegram send failed: {ex.Message}");
+                    }
+                });
+            }
 
             // Update persistent memory in background — never blocks the reply
             if (_coreMemory != null)
@@ -447,13 +482,20 @@ SECURITY:
         {
             string taskId = $"task-{Interlocked.Increment(ref _taskIdCounter)}";
 
+            // Per-task CTS linked to app-level ct — cancelling this stops only this task
+            var taskCts   = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var controlCh = Channel.CreateUnbounded<ControlSignal>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
             var runningTask = new RunningTask
             {
-                Id = taskId,
+                Id          = taskId,
                 Description = intent.Summary,
                 UserRequest = request.Text,
-                Status = "Starting...",
-                StartedAt = DateTime.UtcNow
+                Status      = "Starting...",
+                StartedAt   = DateTime.UtcNow,
+                Cts         = taskCts,
+                ControlCh   = controlCh
             };
 
             _runningTasks[taskId] = runningTask;
@@ -464,9 +506,7 @@ SECURITY:
                 $"STARTED: {Trunc(request.Text, 200)}",
                 new { id = taskId, status = "started" });
 
-            // Acknowledge immediately (don't wait for task to finish)
-            // JarvisCore.OnResponse will fire the actual result when done
-            // So we only send a brief ack if there are other tasks already running
+            // Acknowledge immediately — FluxBrain will deliver the final result once JarvisCore finishes
             if (_runningTasks.Values.Count(t => !t.CompletedAt.HasValue) > 1)
             {
                 OnMessage?.Invoke($"On it — {intent.Summary}", false);
@@ -481,22 +521,40 @@ SECURITY:
                 {
                     runningTask.Status = "Executing...";
 
-                    // CRITICAL: Hide Flux window so screenshots capture the actual desktop
-                    OnHideWindow?.Invoke();
-                    await Task.Delay(150); // Wait for WPF to minimize (WindowState.Minimized is fast)
+                    // Pass the brain's translated directive (intent.Summary = pcTask.Description),
+                    // NOT the raw user chat text — JarvisCore is a silent executor, not a chat partner
+                    string result = await _jarvis.ExecuteTaskAsync(
+                        intent.Summary, taskCts.Token, controlCh.Reader);
 
-                    string result = await _jarvis.ExecuteTaskAsync(request.Text, ct);
-                    runningTask.Status = "Completed";
-                    runningTask.Result = result;
-                    // JarvisCore.OnResponse already fires the chat message
-                    DataLake?.Write("task",
-                        $"DONE: {Trunc(request.Text, 120)} → {Trunc(result, 200)}",
-                        new { id = taskId, status = "done" });
+                    // FluxBrain is the manager — it reads the result and messages the user
+                    if (result.StartsWith("REJECTED:") || result.StartsWith("SAFETY STOP:"))
+                    {
+                        runningTask.Status = "Rejected";
+                        string userMsg = result.Contains("Davos UI")
+                            ? "I can't interact with my own window for that."
+                            : result.Substring(result.IndexOf(':') + 1).Trim();
+                        OnMessage?.Invoke(userMsg, false);
+                        DataLake?.Write("task",
+                            $"REJECTED: {Trunc(request.Text, 120)} → {Trunc(result, 200)}",
+                            new { id = taskId, status = "rejected" });
+                    }
+                    else
+                    {
+                        runningTask.Status = "Completed";
+                        runningTask.Result = result;
+                        string summary = string.IsNullOrWhiteSpace(result)
+                            ? $"Done: {intent.Summary}"
+                            : CleanConversationalResponse(result);
+                        OnMessage?.Invoke(summary, false);
+                        DataLake?.Write("task",
+                            $"DONE: {Trunc(request.Text, 120)} → {Trunc(result, 200)}",
+                            new { id = taskId, status = "done" });
+                    }
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                catch (OperationCanceledException) when (taskCts.IsCancellationRequested)
                 {
                     runningTask.Status = "Cancelled";
-                    OnMessage?.Invoke("Task was cancelled.", false);
+                    OnMessage?.Invoke("Task cancelled.", false);
                     DataLake?.Write("task",
                         $"CANCELLED: {Trunc(request.Text, 150)}",
                         new { id = taskId, status = "cancelled" });
@@ -512,15 +570,15 @@ SECURITY:
                 finally
                 {
                     _pcTaskLock.Release();
+                    taskCts.Dispose();
                     runningTask.CompletedAt = DateTime.UtcNow;
 
-                    // CRITICAL: Show Flux window again after task completes
                     OnShowWindow?.Invoke();
 
                     // Keep in _runningTasks for 5 minutes so user can ask about it
-                    _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(t =>
+                    _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(_ =>
                     {
-                        _runningTasks.TryRemove(taskId, out var removed);
+                        _runningTasks.TryRemove(taskId, out var _);
                     });
 
                     if (_runningTasks.Values.All(t => t.CompletedAt.HasValue))
@@ -562,6 +620,62 @@ Your response:";
 
             string response = await _llm.GenerateText(queryPrompt, 0.5f);
             OnMessage?.Invoke(response, false);
+        }
+
+        /// <summary>
+        /// Stops the most recently started active task.
+        /// Writes Cancel signal FIRST so JarvisCore's catch block can read the reason,
+        /// then cancels the CTS to interrupt any blocking await immediately.
+        /// </summary>
+        private async Task HandleStopTaskAsync(string userText, CancellationToken ct)
+        {
+            var active = _runningTasks.Values
+                .Where(t => !t.CompletedAt.HasValue && t.Cts != null)
+                .OrderByDescending(t => t.StartedAt)
+                .FirstOrDefault();
+
+            if (active == null)
+            {
+                OnMessage?.Invoke("Nothing is running right now.", false);
+                return;
+            }
+
+            OnMessage?.Invoke($"Stopping: {active.Description}…", false);
+
+            // 1. Semantic signal FIRST (so JarvisCore catch block finds it)
+            if (active.ControlCh != null)
+                await active.ControlCh.Writer.WriteAsync(new ControlSignal.Cancel());
+
+            // 2. Cancel the token — interrupts any blocking await in JarvisCore immediately
+            active.Cts!.Cancel();
+        }
+
+
+        /// <summary>
+        /// Serializes last 3 conversation turns + origin message into a JSON context snapshot
+        /// that will be re-injected when an autonomous commitment fires.
+        /// </summary>
+        private string BuildContextSnapshot(BrainRequest request, List<ChatMessage> history)
+        {
+            var recent = history.TakeLast(6).Select(m => new
+            {
+                role = m.IsUser ? "user" : "davos",
+                text = m.Text?.Length > 300 ? m.Text[..300] + "…" : m.Text ?? ""
+            });
+            return System.Text.Json.JsonSerializer.Serialize(new
+            {
+                originMessage = request.Text,
+                recentTurns   = recent
+            });
+        }
+
+        private bool HasActiveTask() =>
+            _runningTasks.Values.Any(t => !t.CompletedAt.HasValue);
+
+        private static bool IsStopCommand(string text)
+        {
+            var words = text.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return words.Length <= 5 && words.Any(w => _stopWords.Contains(w));
         }
 
         /// <summary>Handle a complex multi-step goal — routes to SwarmOrchestrator for parallel agent execution.</summary>
@@ -712,6 +826,20 @@ Your response:";
             if (!string.IsNullOrWhiteSpace(clip))
                 sb.AppendLine($"<external_data source=\"clipboard\" trusted=\"false\">\n{clip.Trim()}\n</external_data>");
 
+            // Now Playing — SMTC sensor (only injected when media is active)
+            var media = _cortex?.GetMediaInfo();
+            if (media != null)
+            {
+                string state    = media.IsPlaying ? "▶ Playing" : "⏸ Paused";
+                string timeline = media.Duration > TimeSpan.Zero
+                    ? $"{media.Position:mm\\:ss} / {media.Duration:mm\\:ss}"
+                    : media.Position > TimeSpan.Zero ? $"{media.Position:mm\\:ss}" : "";
+                string album    = !string.IsNullOrEmpty(media.Album) ? $" [{media.Album}]" : "";
+                string app      = !string.IsNullOrEmpty(media.AppName) ? $" via {media.AppName}" : "";
+                string tl       = !string.IsNullOrEmpty(timeline) ? $" @ {timeline}" : "";
+                sb.AppendLine($"[SYSTEM AUDIO SENSOR: {state} — '{media.Title}' by {media.Artist}{album}{tl}{app}]");
+            }
+
             return sb.Length > 0 ? $"<passive_context>\n{sb}</passive_context>\n\n" : "";
         }
 
@@ -775,12 +903,19 @@ Your response:";
         public async ValueTask DisposeAsync()
         {
             _cts.Cancel();
-            if (_processLoopTask != null)
+
+            var waitTasks = new List<Task>();
+            if (_processLoopTask != null) waitTasks.Add(_processLoopTask);
+            if (_agentLoopTask   != null) waitTasks.Add(_agentLoopTask);
+
+            if (waitTasks.Count > 0)
             {
-                try { await _processLoopTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+                try { await Task.WhenAll(waitTasks).WaitAsync(TimeSpan.FromSeconds(5)); }
                 catch { }
             }
+
             try { await _swarm.DisposeAsync(); } catch { }
+            _commitments?.Dispose();
             _cts.Dispose();
             _historyLock.Dispose();
         }
@@ -792,7 +927,15 @@ Your response:";
 
     public enum RequestPriority { Low, Normal, High, Critical }
 
-    public enum IntentType { Chat, PcTask, TaskQuery, MultiTask, SelfCoding }
+    public enum IntentType { Chat, PcTask, TaskQuery, MultiTask, SelfCoding, InjectCtx }
+
+    /// <summary>Semantic control signals sent to JarvisCore mid-task via ControlChannel.</summary>
+    public abstract record ControlSignal
+    {
+        public record Cancel : ControlSignal;
+        public record Pause  : ControlSignal;
+        public record Resume : ControlSignal;
+    }
 
     public class BrainRequest
     {
@@ -800,6 +943,10 @@ Your response:";
         public string Text { get; init; } = "";
         public RequestPriority Priority { get; init; }
         public DateTime Timestamp { get; init; }
+        /// <summary>True when fired autonomously (commitment timer, not user message).</summary>
+        public bool IsAutonomous { get; init; } = false;
+        /// <summary>JSON context snapshot from when the commitment was created. Null for user requests.</summary>
+        public string? CommitmentContext { get; init; }
     }
 
     public class ClassifiedIntent
@@ -819,5 +966,9 @@ Your response:";
         public DateTime StartedAt { get; init; }
         public DateTime? CompletedAt { get; set; }
         public string? Result { get; set; }
+        /// <summary>Per-task CTS linked to the app-level token. Cancel this to stop only this task.</summary>
+        public CancellationTokenSource? Cts { get; init; }
+        /// <summary>Semantic control channel — write signals before cancelling Cts.</summary>
+        public Channel<ControlSignal>? ControlCh { get; init; }
     }
 }

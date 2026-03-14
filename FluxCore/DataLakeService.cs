@@ -13,7 +13,7 @@ namespace FluxCore
     /// Backed by SQLite at %APPDATA%\Davos\datalake.db
     ///
     /// Source tags: clipboard | file | notification | chrome | vscode |
-    ///              telegram | terminal | git | eventlog
+    ///              telegram | terminal | git | eventlog | chat | task | inner_voice
     /// </summary>
     public class DataLakeService : IDisposable
     {
@@ -60,10 +60,13 @@ namespace FluxCore
 
         // ── Public API ────────────────────────────────────────────────────────────
 
-        /// <summary>Appends one event to the data lake. Thread-safe. Never throws.</summary>
-        public void Write(string source, string content, object? meta = null)
+        /// <summary>
+        /// Appends one event to the data lake. Thread-safe. Never throws.
+        /// Returns the inserted row ID so callers can pass it to SaveChunked for traceability.
+        /// </summary>
+        public long Write(string source, string content, object? meta = null)
         {
-            if (string.IsNullOrEmpty(content)) return;
+            if (string.IsNullOrEmpty(content)) return 0;
             string metaJson = meta != null ? JsonSerializer.Serialize(meta) : "";
             // Truncate very large payloads to keep DB manageable
             if (content.Length > 32_000) content = content[..32_000] + "…";
@@ -81,8 +84,12 @@ namespace FluxCore
                     cmd.Parameters.AddWithValue("$c", content);
                     cmd.Parameters.AddWithValue("$m", metaJson);
                     cmd.ExecuteNonQuery();
+
+                    using var rowIdCmd = conn.CreateCommand();
+                    rowIdCmd.CommandText = "SELECT last_insert_rowid()";
+                    return (long)(rowIdCmd.ExecuteScalar() ?? 0L);
                 }
-                catch { /* background — never throw */ }
+                catch { return 0; /* background — never throw */ }
             }
         }
 

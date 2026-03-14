@@ -17,9 +17,20 @@ namespace FluxCore
         /// </summary>
         private string BuildDynamicContext(string originalGoal, List<string> failures,
             List<string> successes, string activeWindow, int step,
-            string clickableElements, List<string> memories)
+            string clickableElements, List<string> memories, string ragContext = "")
         {
             var sb = new StringBuilder();
+
+            // ── Mid-task context injection (prepended at TOP so the LLM cannot miss it) ──
+            // FluxBrain calls InjectMidTaskContext() when the user sends a message while
+            // a task is running (INJECT_CTX intent).
+            var urgentUpdates = new StringBuilder();
+            while (_midTaskContext.TryDequeue(out var ctx))
+                urgentUpdates.AppendLine($"[URGENT MID-TASK UPDATE FROM USER]: {ctx}\nAdapt your next steps immediately.");
+
+            if (urgentUpdates.Length > 0)
+                sb.Append(urgentUpdates);
+
             sb.AppendLine($"USER REQUEST: {originalGoal}");
             sb.AppendLine($"ACTIVE WINDOW: {activeWindow} | Step: {step + 1}/30");
             sb.AppendLine("You can SEE the screen and control it.");
@@ -52,21 +63,25 @@ namespace FluxCore
                 sb.AppendLine($"\n{clickableElements}");
             }
 
-            // ── Passive context ────────────────────────────────────────────────────
+            // ── RAG slot: query-relevant long-term memory (3000 chars) ────────────
+            if (!string.IsNullOrEmpty(ragContext))
+                AppendPassive(sb, $"<rag_memory>\n{Cap(ragContext, 3000)}\n</rag_memory>");
+
+            // ── Passive context: immediate-awareness tier (reduced budgets) ────────
             // Cap()     : hard character limit per source — prevents prompt bloat
             // Untrusted(): wraps external-origin data so LLM never treats it as instructions
-            AppendPassive(sb, Cap(Untrusted(Clipboard?.GetRecentClipboard(10),              "clipboard"),   1200));
-            AppendPassive(sb, Cap(Untrusted(FileWatcher?.GetRecentActivity(20),           "filesystem"),   800));
-            AppendPassive(sb, Cap(_cortex?.GetFocusTimeline(180),                                          500));
-            AppendPassive(sb, Cap(GitWatcher?.GetGitSummary(),                                             400));
+            AppendPassive(sb, Cap(Untrusted(Clipboard?.GetRecentClipboard(5),              "clipboard"),   300));
+            AppendPassive(sb, Cap(Untrusted(FileWatcher?.GetRecentActivity(10),           "filesystem"),   400));
+            AppendPassive(sb, Cap(_cortex?.GetFocusTimeline(60),                                           300));
+            AppendPassive(sb, Cap(GitWatcher?.GetGitSummary(),                                             300));
             AppendPassive(sb, Cap(Metrics?.GetMetricsSummary(),                                            150));
-            AppendPassive(sb, Cap(Untrusted(Notifications?.GetRecentNotifications(15),    "system"),       600));
-            AppendPassive(sb, Cap(Untrusted(ChromeBridge?.GetPageContext(),               "chrome"),      2000));
-            AppendPassive(sb, Cap(Untrusted(ChromeBridge?.GetVsCodeContext(),             "vscode"),       800));
-            AppendPassive(sb, Cap(Untrusted(Telegram?.GetRecentMessages(10),              "telegram"),    1200));
-            AppendPassive(sb, Cap(Untrusted(TerminalSource?.GetRecentTerminalOutput(5),   "terminal"),     600));
-            AppendPassive(sb, Cap(Untrusted(EventLog?.GetRecentErrors(5),                 "eventlog"),     350));
-            AppendPassive(sb, Cap(DataLake?.GetRecent("task", 8),                                          600));
+            AppendPassive(sb, Cap(Untrusted(Notifications?.GetRecentNotifications(8),     "system"),       300));
+            AppendPassive(sb, Cap(Untrusted(ChromeBridge?.GetPageContext(),               "chrome"),       400));
+            AppendPassive(sb, Cap(Untrusted(ChromeBridge?.GetVsCodeContext(),             "vscode"),       400));
+            AppendPassive(sb, Cap(Untrusted(Telegram?.GetRecentMessages(5),               "telegram"),     400));
+            AppendPassive(sb, Cap(Untrusted(TerminalSource?.GetRecentTerminalOutput(3),   "terminal"),     300));
+            AppendPassive(sb, Cap(Untrusted(EventLog?.GetRecentErrors(3),                 "eventlog"),     200));
+            AppendPassive(sb, Cap(DataLake?.GetRecent("task", 5),                                          400));
 
             // BATCH REMINDER — reinforce at key points
             if (step <= 2)

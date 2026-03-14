@@ -60,6 +60,9 @@ namespace FluxCore
         /// <summary>Optional — set after construction to persist events to the data lake.</summary>
         public DataLakeService? DataLake { get; set; }
 
+        /// <summary>Optional — set after construction to store chunked page text in semantic memory.</summary>
+        public MemoryService? Memory { get; set; }
+
         public ChromeBridgeService()
         {
             try
@@ -146,10 +149,15 @@ namespace FluxCore
                             }
                         }
 
-                        // Persist page text to data lake
+                        // Persist page text to data lake and semantic memory (chunked)
                         if (!string.IsNullOrEmpty(payload.Text))
-                            DataLake?.Write("chrome", payload.Text,
-                                new { url = payload.Url, title = payload.Title });
+                        {
+                            long lakeId = DataLake?.Write("chrome", payload.Text,
+                                new { url = payload.Url, title = payload.Title }) ?? 0;
+                            if (Memory != null)
+                                _ = Memory.SaveChunked(payload.Text, "chrome",
+                                    lakeId > 0 ? lakeId : null);
+                        }
                     }
                 }
 

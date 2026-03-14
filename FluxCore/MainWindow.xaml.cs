@@ -61,6 +61,7 @@ namespace FluxCore
 
         private FluxBrain? _brain; // NEW: Central intelligence router
         private GeminiTtsService? _tts; // TTS via Gemini Live API
+        private InnerVoice.InnerVoiceService? _innerVoice; // Autonomous companion loop
         private bool _isSecondary = false;
         private bool _isMicOn = false;
         private bool _requireWakeWord = false;
@@ -73,6 +74,9 @@ namespace FluxCore
 
         private StringBuilder _voiceLog = new StringBuilder();
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
+
+        // Inner Voice panel data
+        public ObservableCollection<InnerThought> InnerVoiceThoughts { get; set; } = new ObservableCollection<InnerThought>();
 
 
         private const string SessionFile = "session_history.json";
@@ -109,6 +113,8 @@ namespace FluxCore
             this.DataContext = this;
             ChatList.ItemsSource = Messages;
             this.Loaded += OnWindowLoaded;
+            // InnerVoiceList bound after InitializeComponent so the x:Name is resolved
+            InnerVoiceList.ItemsSource = InnerVoiceThoughts;
         }
 
         private void LoadSession()
@@ -194,6 +200,17 @@ namespace FluxCore
                 _cortex.StartFocusTracking();
                 _gemini = new GeminiService(API_KEY);
 
+                // Start local ONNX embedder (downloads all-MiniLM-L6-v2 on first run, ~90 MB)
+                // Degrades gracefully to Gemini text-embedding-004 API until ready
+                var localEmbedder = new LocalEmbeddingService();
+                _gemini.SetLocalEmbedder(localEmbedder);
+                _ = Task.Run(async () => {
+                    try { await localEmbedder.EnsureInitializedAsync(); }
+                    catch (Exception ex) {
+                        System.Diagnostics.Debug.WriteLine($"[LocalEmbed] Init failed: {ex.Message}");
+                    }
+                });
+
                 // Build ILLMService — either raw Gemini or ModelRouter with local fallback
                 ILLMService llm = _gemini; // default: Gemini only
                 if (_settings.EnableLocalModel)
@@ -267,6 +284,7 @@ namespace FluxCore
                 _fileWatcher.DataLake       = _dataLake;
                 _notifications.DataLake     = _dataLake;
                 _chromeBridge.DataLake      = _dataLake;
+                _chromeBridge.Memory        = _memory;
                 _codeRunner.DataLake        = _dataLake;
 
                 // EventLog service (Phase F1)
@@ -320,6 +338,9 @@ namespace FluxCore
                 _brain.DataLake = _dataLake; // Wire DataLake for task persistence and chat context
                 _coreMemory = new CoreMemoryService(llm);
                 _brain.SetCoreMemory(_coreMemory);
+                // Wire MemoryEngine into brain (chat RAG) and jarvis (task RAG) — Fix 6
+                _brain.SetMemoryEngine(_memoryEngine);
+                _jarvis.MemoryEngineRag = _memoryEngine;
 
                 // Confidence-based confirmation gates
                 _brain.OnConfirmationNeeded = async (q) => await RequestConfirmationAsync(q);
@@ -353,6 +374,15 @@ namespace FluxCore
                     this.Activate();
                 }));
 
+                // CommitmentStore: SQLite-backed deferred action scheduler
+                // Stored in same %APPDATA%\Davos\ folder as other persistence
+                string davosDir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos");
+                System.IO.Directory.CreateDirectory(davosDir);
+                var commitmentStore = new CommitmentStore(
+                    System.IO.Path.Combine(davosDir, "commitments.db"));
+                _brain.SetCommitmentStore(commitmentStore);
+
                 _brain.Start();
                 System.Diagnostics.Debug.WriteLine("[BRAIN] FluxBrain started successfully");
 
@@ -380,5 +410,21 @@ namespace FluxCore
             }
             catch (Exception ex) { AddMessage($"Init Failed: {ex.Message}", false); }
         }
+
+        private void Tab_InnerVoice_Click(object sender, RoutedEventArgs e)
+        {
+            ChatList.Visibility        = Visibility.Collapsed;
+            MemoryPanel.Visibility     = Visibility.Collapsed;
+            TasksPanel.Visibility      = Visibility.Collapsed;
+            InnerVoicePanel.Visibility = Visibility.Visible;
+            UpdateTabColors("innervoice");
+        }
+    }
+
+    /// <summary>A single entry in the Inner Voice thought feed.</summary>
+    public class InnerThought
+    {
+        public string Time { get; set; } = "";
+        public string Text { get; set; } = "";
     }
 }

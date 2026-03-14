@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using FluxCore.LLM;
 
@@ -35,6 +38,12 @@ namespace FluxCore
         internal TelegramService?         Telegram;
         internal KnowledgeGraphService?   KnowledgeGraph;
         internal CodeExecutionAgent?      TerminalSource; // for terminal history ring buffer
+
+        /// <summary>
+        /// When set, RetrieveAsync is called once at task start to populate a 3000-char
+        /// RAG slot in the dynamic context, replacing the old static passive-source flood.
+        /// </summary>
+        public MemoryEngine? MemoryEngineRag { get; set; }
 
         private readonly Func<string> _getScreenshot;
         private readonly Func<string> _getActiveWindow;
@@ -68,11 +77,23 @@ namespace FluxCore
         private bool _screenAccessGranted = false;
         private Func<string, Task<bool>>? _requestScreenAccess; // Callback to ask user for screen permission
 
+        // MID-TASK CONTEXT INJECTION
+        // User messages while a task is running are enqueued here.
+        // BuildDynamicContext drains this queue and prepends an URGENT tag so the LLM
+        // immediately reads the new context at the very next step.
+        private readonly ConcurrentQueue<string> _midTaskContext = new();
+
+        /// <summary>
+        /// Enqueue a mid-task context update from the user.
+        /// Thread-safe — can be called from any thread (e.g. ProcessSingleRequestAsync on the brain thread).
+        /// </summary>
+        public void InjectMidTaskContext(string text) => _midTaskContext.Enqueue(text);
+
         // Commands that can run in background (no screen needed)
         private static readonly HashSet<string> BackgroundCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "POWERSHELL", "PS", "PYTHON", "RUN_PYTHON", "RUN_SHELL",
-            "RESPOND", "WAIT", "LOG"
+            "REJECT", "WAIT", "LOG"
         };
 
         // Commands that REQUIRE screen access
@@ -159,7 +180,8 @@ namespace FluxCore
             string realDocuments = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             string realProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _staticInstruction = $@"<identity>
-You are Davos — an AI companion running on this Windows PC. You're not a tool or assistant. You're a friend who happens to have full control of this computer. You have opinions, you notice things, you remember everything about the user. During task execution you focus on action, but you're never a blank robot.
+You are Davos's automation engine — a silent, precise PC execution layer. You click, type, run scripts, and control Windows applications. You do not chat. You do not send messages. You do not schedule. You do not set timers. You execute one thing: Windows UI automation and shell scripting.
+If the task you received is NOT achievable through Windows UI automation or PowerShell (e.g., it requires scheduling, sending the user a message, or having a conversation), immediately output [[REJECT: brief reason]] and nothing else. Do not attempt the task.
 </identity>
 
 <self_knowledge>
@@ -202,7 +224,8 @@ CONFIDENCE: [0.0-1.0]
   [[SCROLL:up/down]]    - Scroll the active window
   [[RUN_SHELL:script]]  - Run PowerShell script. ALWAYS available for any task.
   [[OPEN_APP:name]]     - Open or focus an application
-  [[RESPOND:text]]      - FINAL answer to the user. ONLY when task is DONE.
+  [[REJECT:reason]]     - Exit immediately when the task is NOT a Windows automation task.
+                          Use when asked to schedule, set timers, send messages, or have a conversation.
 
 TOOL SELECTION (choose the FASTEST approach for each subtask):
   Navigate to URL     → [[OPEN_APP:chrome]] + [[KEYS:CTRL+L]] + [[TYPE:url]] + [[KEYS:ENTER]]
@@ -213,7 +236,7 @@ TOOL SELECTION (choose the FASTEST approach for each subtask):
   System task         → [[RUN_SHELL:...]]
   Save in app         → [[KEYS:CTRL+S]]
   Close popup         → [[KEYS:ESCAPE]]
-  Answer user         → [[RESPOND:text]] (ONLY when task is DONE, then TASK_COMPLETE)
+  Not a PC task       → [[REJECT:reason]] then TASK_COMPLETE
 </tools>
 
 <rules priority=""critical"">
@@ -252,7 +275,6 @@ WEB NAVIGATION:
 
 SPEED (minimize steps!):
   - Combine related actions: [[KEYS:CTRL+L]] + [[TYPE:url]] + [[KEYS:ENTER]] = 1 step.
-  - [[RESPOND:text]] is FINAL. Do NOT use RESPOND mid-task. Only when DONE.
   - TASK_COMPLETE only AFTER verifying the result on screen or in output.
 
 PAST LESSONS:
@@ -323,13 +345,22 @@ import pygame
         public event Action<string>? OnAction;
         public event Action<bool, string>? OnValidation; // success, reason
 
+        // TASK HEALTH EVENT — reports stuck/failing state up to FluxBrain
+        public event Action<string>? OnTaskWarning;
+        private volatile bool _pausedForUserInput = false;
+        public void PauseForUserInput()   => _pausedForUserInput = true;
+        public void ResumeFromUserInput() => _pausedForUserInput = false;
+
         // CHAT RESPONSE EVENT - The actual AI response to show in chat
         public event Action<string>? OnResponse;
 
         /// <summary>
         /// Main entry point. Executes a task with intelligent retry and recovery.
         /// </summary>
-        public async Task<string> ExecuteTaskAsync(string userRequest, CancellationToken ct = default)
+        public async Task<string> ExecuteTaskAsync(
+            string userRequest,
+            CancellationToken ct = default,
+            ChannelReader<ControlSignal>? controlCh = null)
         {
             var log = new StringBuilder();
             var failedAttempts = new List<string>();
@@ -388,10 +419,29 @@ import pygame
                 }
             }
 
+            // Fetch RAG context once per task (not per step) to avoid repeated LLM calls
+            string ragBlock = "";
+            if (MemoryEngineRag != null)
+            {
+                try { ragBlock = await MemoryEngineRag.RetrieveAsync(userRequest); }
+                catch (Exception ex) {
+                    System.Diagnostics.Debug.WriteLine($"[RAG] RetrieveAsync failed: {ex.Message}");
+                }
+            }
+
             for (int iteration = 0; iteration < MAX_STEPS; iteration++)
             {
                 // Check for cancellation at start of each step
                 ct.ThrowIfCancellationRequested();
+
+                // Pause gate: FluxBrain sets this when waiting for user guidance
+                if (_pausedForUserInput)
+                {
+                    _logToUI("[⏸] Waiting for your guidance...");
+                    while (_pausedForUserInput)
+                        await Task.Delay(200, ct);
+                    _logToUI("[▶] Resuming task...");
+                }
 
                 _logToUI($"[DEBUG] Starting Step {iteration + 1}...");
                 _logger.Log($"STARTING STEP {iteration + 1}");
@@ -467,7 +517,7 @@ import pygame
 
                 // 2. Build DYNAMIC context (per-step data only — static rules are in _staticInstruction)
                 _logger.Log("Building Context...");
-                string dynamicContext = BuildDynamicContext(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories);
+                string dynamicContext = BuildDynamicContext(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories, ragBlock);
                 _logger.Log("Context Built.");
 
                 // 3. Ask AI: _staticInstruction is CACHED by Gemini, dynamicContext changes per step
@@ -568,6 +618,18 @@ import pygame
                         System.Globalization.CultureInfo.InvariantCulture, out actionConfidence);
                 }
                 detailedLog.AppendLine($"[CONFIDENCE]: {actionConfidence:F2}");
+
+                // REJECT detection — task is outside JarvisCore's domain, exit immediately
+                var rejectMatch = System.Text.RegularExpressions.Regex.Match(
+                    aiResponse, @"\[\[REJECT:(.*?)\]\]",
+                    System.Text.RegularExpressions.RegexOptions.Singleline);
+                if (rejectMatch.Success)
+                {
+                    string rejectReason = rejectMatch.Groups[1].Value.Trim();
+                    System.Diagnostics.Debug.WriteLine($"[JarvisCore] REJECT: {rejectReason}");
+                    _logToUI($"[JarvisCore] Rejected task: {rejectReason}");
+                    return $"REJECTED: {rejectReason}";
+                }
 
                 // 4. EXTRACT COMMANDS from AI response
                 string commandText = aiResponse;
@@ -708,7 +770,29 @@ import pygame
                         OnStateChanged?.Invoke("ACTING");
                         OnAction?.Invoke(currentAction);
 
-                        ExecutionOutcome outcome = await ExecuteWithRetryAsync(cmd.Type, cmd.Arg);
+                        ExecutionOutcome outcome;
+                        try
+                        {
+                            outcome = await ExecuteWithRetryAsync(cmd.Type, cmd.Arg);
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                        {
+                            // CTS was triggered by HandleStopTaskAsync.
+                            // Read ControlChannel to find the semantic reason.
+                            if (controlCh != null && controlCh.TryRead(out var signal))
+                            {
+                                string cancelMsg = signal switch
+                                {
+                                    ControlSignal.Cancel => "Task cancelled by user.",
+                                    ControlSignal.Pause  => "Task paused.",
+                                    _                    => "Task interrupted."
+                                };
+                                // Return the message — FluxBrain (the manager) will deliver it to the user
+                                return cancelMsg;
+                            }
+                            // No signal = app shutdown — re-throw so the outer handler disposes cleanly
+                            throw;
+                        }
 
                         // DEBUG: Log execution result
                         _logger.Log($"  Result: {(outcome.Success ? "✓" : "✗")} {outcome.Message}");
@@ -757,6 +841,14 @@ import pygame
                         }
                         else
                         {
+                            // SAFETY STOP on Davos's own window — terminal failure, exit immediately
+                            if (outcome.Message.Contains("SAFETY STOP") && outcome.Message.Contains("Davos UI"))
+                            {
+                                System.Diagnostics.Debug.WriteLine("[JarvisCore] Safety stop on Davos UI — terminating task.");
+                                _logToUI("[JarvisCore] Safety stop: tried to interact with Davos's own window.");
+                                return outcome.Message;
+                            }
+
                             string failureMsg = $"FAILED: {currentAction} -> {outcome.Message}";
                             failedAttempts.Add(failureMsg);
                             executedCmds.Add($"FAIL {currentAction} -> {outcome.Message}");
@@ -921,6 +1013,7 @@ import pygame
                             IsUser = true
                         });
                         _logToUI("[⚠️] Stall detected: No progress for 5 steps");
+                        OnTaskWarning?.Invoke($"stall:step={iteration + 1},no_progress_for=5_steps");
                         lastProgressStep = iteration; // Reset to avoid spamming
                     }
 
@@ -936,6 +1029,7 @@ import pygame
                             IsUser = true
                         });
                         _logToUI("[🛑] Circuit breaker: 4 consecutive all-fail steps");
+                        OnTaskWarning?.Invoke($"circuit_breaker:step={iteration + 1},consecutive_all_fail=4");
                         consecutiveFailSteps = 0; // Reset after warning
                     }
 
@@ -977,7 +1071,11 @@ import pygame
                             IsUser = true
                         });
                     }
-                    if (noCommandCount >= 7) break;
+                    if (noCommandCount >= 7)
+                    {
+                        OnTaskWarning?.Invoke($"gave_up:step={iteration + 1},empty_turns={noCommandCount}");
+                        break;
+                    }
                     failedAttempts.Add("No action command found in response.");
                 }
             }

@@ -289,6 +289,26 @@ Return ONLY valid JSON array or []. No explanation.";
             catch { return ""; }
         }
 
+        /// <summary>
+        /// Returns all node names ordered by frequency (most-mentioned first, max 1000).
+        /// Used by MemoryEngine for GraphRAG entity matching against retrieved chunks.
+        /// </summary>
+        public IEnumerable<string> GetAllNodeNames()
+        {
+            try
+            {
+                using var conn = Open();
+                using var cmd  = conn.CreateCommand();
+                cmd.CommandText =
+                    "SELECT name FROM KG_Node ORDER BY seen_n DESC LIMIT 1000";
+                var names = new List<string>();
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) names.Add(r.GetString(0));
+                return names;
+            }
+            catch { return Enumerable.Empty<string>(); }
+        }
+
         private SqliteConnection Open()
         {
             var conn = new SqliteConnection(_connStr);

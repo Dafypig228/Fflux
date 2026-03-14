@@ -11,23 +11,28 @@ namespace FluxCore
     /// Composite retrieval engine — single entry point for all historical data.
     ///
     /// Retrieval pipeline per query:
-    ///   1. Knowledge graph   — find matching entities (who/what/project)
-    ///   2. Data lake SQL     — pull exact recent events mentioning those entities
-    ///   3. Semantic search   — MemoryService vector similarity (existing)
-    ///   4. Merge + deduplicate → unified string for LLM context
+    ///   1. Semantic search     — MemoryService vector similarity (query-rewritten + time-weighted)
+    ///   2. GraphRAG pivot      — extract entity names from retrieved chunks, look up in KG
+    ///   3. Data lake SQL       — exact keyword matches in recent events
+    ///   4. Merge + truncate    → unified string for LLM context
     ///
     /// Keeps existing MemoryService for embeddings — wraps, doesn't replace it.
     /// </summary>
     public class MemoryEngine
     {
-        private readonly MemoryService?       _memory;
-        private readonly DataLakeService?     _lake;
+        private readonly MemoryService?         _memory;
+        private readonly DataLakeService?       _lake;
         private readonly KnowledgeGraphService? _kg;
 
         // Budget limits per retrieval call
         private const int MaxSemanticResults = 5;
         private const int MaxLakeRows        = 10;
         private const int MaxOutputChars     = 3000;
+
+        // GraphRAG: KG node name cache to avoid a DB query on every search call
+        private HashSet<string> _kgNodeCache = new(StringComparer.OrdinalIgnoreCase);
+        private DateTime        _kgCacheTime = DateTime.MinValue;
+        private readonly object _kgCacheLock = new();
 
         public MemoryEngine(
             MemoryService?          memory = null,
@@ -51,20 +56,57 @@ namespace FluxCore
 
             var parts = new List<string>();
 
-            // 1. Knowledge graph — entity summary
+            // ── Step 1: Semantic search (includes query rewrite + time-weighted scoring) ──
+            List<string> semanticHits = new();
             try
             {
-                var entities = ExtractKeywords(query);
-                foreach (var entity in entities.Take(3))
+                if (_memory != null)
                 {
-                    string kgResult = _kg?.GetGraphContext(entity) ?? "";
-                    if (!string.IsNullOrEmpty(kgResult))
-                        parts.Add(kgResult);
+                    semanticHits = await _memory.SearchRelevant(query, limit: MaxSemanticResults);
+                    if (semanticHits.Count > 0)
+                        parts.Add("=== SEMANTIC MEMORY ===\n  " +
+                                  string.Join("\n  ", semanticHits));
                 }
             }
             catch { }
 
-            // 2. Data lake — recent events matching keywords
+            // ── Step 2: GraphRAG pivot — extract entities from chunks, then KG lookup ─────
+            if (_kg != null)
+            {
+                var entityNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                if (semanticHits.Count > 0)
+                {
+                    // Strip the [MEM] (cos:x.xx) prefix to get raw chunk text
+                    var chunkTexts = semanticHits
+                        .Select(h => Regex.Replace(h, @"^\[MEM\].*?\)\s*", ""))
+                        .ToList();
+
+                    var kgNodeNames = GetCachedNodeNames();
+                    foreach (string chunk in chunkTexts)
+                        foreach (string name in kgNodeNames)
+                            if (chunk.Contains(name, StringComparison.OrdinalIgnoreCase))
+                                entityNames.Add(name);
+                }
+
+                // Also add top keywords from raw query
+                foreach (string kw in ExtractKeywords(query).Take(3))
+                    entityNames.Add(kw);
+
+                // KG lookup for each matched entity
+                foreach (string entity in entityNames.Take(5))
+                {
+                    try
+                    {
+                        string kgResult = _kg.GetGraphContext(entity);
+                        if (!string.IsNullOrEmpty(kgResult))
+                            parts.Add(kgResult);
+                    }
+                    catch { }
+                }
+            }
+
+            // ── Step 3: Data lake — recent events matching keywords ────────────────────
             try
             {
                 if (_lake != null)
@@ -99,19 +141,6 @@ namespace FluxCore
             }
             catch { }
 
-            // 3. Semantic memory search (existing MemoryService vector search)
-            try
-            {
-                if (_memory != null)
-                {
-                    var semanticList = await _memory.SearchRelevant(query, limit: MaxSemanticResults);
-                    if (semanticList != null && semanticList.Count > 0)
-                        parts.Add("=== SEMANTIC MEMORY ===\n  " +
-                                  string.Join("\n  ", semanticList));
-                }
-            }
-            catch { }
-
             if (parts.Count == 0) return "";
 
             string combined = string.Join("\n", parts);
@@ -125,22 +154,28 @@ namespace FluxCore
         /// No LLM calls, no semantic search. Use for context building.
         /// </summary>
         public string GetRecentBySource(string source, int count = 5)
-        {
-            return _lake?.GetRecent(source, count) ?? "";
-        }
+            => _lake?.GetRecent(source, count) ?? "";
 
         /// <summary>Top topics from knowledge graph for a system prompt snippet.</summary>
         public string GetTopTopicsContext(int n = 5)
-        {
-            return _kg?.GetTopTopics(n) ?? "";
-        }
+            => _kg?.GetTopTopics(n) ?? "";
 
         // ── Helpers ───────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Extracts candidate keywords from a natural language query.
-        /// Removes stop words, returns meaningful tokens.
-        /// </summary>
+        private HashSet<string> GetCachedNodeNames()
+        {
+            lock (_kgCacheLock)
+            {
+                if ((DateTime.Now - _kgCacheTime).TotalMinutes < 5 && _kgNodeCache.Count > 0)
+                    return _kgNodeCache;
+
+                var names = _kg?.GetAllNodeNames() ?? Enumerable.Empty<string>();
+                _kgNodeCache = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+                _kgCacheTime = DateTime.Now;
+                return _kgNodeCache;
+            }
+        }
+
         private static List<string> ExtractKeywords(string query)
         {
             var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)

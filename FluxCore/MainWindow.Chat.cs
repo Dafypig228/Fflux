@@ -88,17 +88,19 @@ namespace FluxCore
         // =========================================
         private void Tab_Chat_Click(object sender, RoutedEventArgs e)
         {
-            ChatList.Visibility = Visibility.Visible;
-            MemoryPanel.Visibility = Visibility.Collapsed;
-            TasksPanel.Visibility = Visibility.Collapsed;
+            ChatList.Visibility        = Visibility.Visible;
+            MemoryPanel.Visibility     = Visibility.Collapsed;
+            TasksPanel.Visibility      = Visibility.Collapsed;
+            InnerVoicePanel.Visibility = Visibility.Collapsed;
             UpdateTabColors("chat");
         }
 
         private async void Tab_Memory_Click(object sender, RoutedEventArgs e)
         {
-            ChatList.Visibility = Visibility.Collapsed;
-            MemoryPanel.Visibility = Visibility.Visible;
-            TasksPanel.Visibility = Visibility.Collapsed;
+            ChatList.Visibility        = Visibility.Collapsed;
+            MemoryPanel.Visibility     = Visibility.Visible;
+            TasksPanel.Visibility      = Visibility.Collapsed;
+            InnerVoicePanel.Visibility = Visibility.Collapsed;
             UpdateTabColors("memory");
 
             // Load memories
@@ -111,9 +113,10 @@ namespace FluxCore
 
         private void Tab_Tasks_Click(object sender, RoutedEventArgs e)
         {
-            ChatList.Visibility = Visibility.Collapsed;
-            MemoryPanel.Visibility = Visibility.Collapsed;
-            TasksPanel.Visibility = Visibility.Visible;
+            ChatList.Visibility        = Visibility.Collapsed;
+            MemoryPanel.Visibility     = Visibility.Collapsed;
+            TasksPanel.Visibility      = Visibility.Visible;
+            InnerVoicePanel.Visibility = Visibility.Collapsed;
             UpdateTabColors("tasks");
 
             // Load running tasks from brain
@@ -125,9 +128,12 @@ namespace FluxCore
 
         private void UpdateTabColors(string activeTab)
         {
-            TabChat.Foreground = activeTab == "chat" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
-            TabMemory.Foreground = activeTab == "memory" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
-            TabTasks.Foreground = activeTab == "tasks" ? new SolidColorBrush(Color.FromRgb(0, 255, 209)) : new SolidColorBrush(Color.FromRgb(170, 170, 170));
+            var cyan = new SolidColorBrush(Color.FromRgb(0, 255, 209));
+            var grey = new SolidColorBrush(Color.FromRgb(170, 170, 170));
+            TabChat.Foreground       = activeTab == "chat"       ? cyan : grey;
+            TabMemory.Foreground     = activeTab == "memory"     ? cyan : grey;
+            TabTasks.Foreground      = activeTab == "tasks"      ? cyan : grey;
+            TabInnerVoice.Foreground = activeTab == "innervoice" ? cyan : grey;
         }
         private void NameBox_TextChanged(object sender, TextChangedEventArgs e) { _panelName = NameBox.Text; TitleText.Text = _panelName.ToUpper(); }
 

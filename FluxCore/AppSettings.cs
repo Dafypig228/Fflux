@@ -65,7 +65,29 @@ namespace FluxCore
         public string TelegramApiHash { get; set; } = "";
         /// <summary>Chat/user IDs to monitor. Empty list = all DMs and groups (no channels).</summary>
         public System.Collections.Generic.List<long> TelegramChatIds { get; set; } = new();
-        
+
+        // Inner Voice (autonomous companion loop)
+        /// <summary>Enable the autonomous inner voice loop (requires Telegram to be configured).</summary>
+        public bool InnerVoiceEnabled { get; set; } = false;
+        /// <summary>
+        /// The user's own Telegram user ID — Davos sends autonomous messages here.
+        /// Paste your numeric Telegram user ID (visible in @userinfobot or the chat picker).
+        /// </summary>
+        public long TelegramOwnerChatId { get; set; } = 0;
+        /// <summary>
+        /// Channel ID that Davos posts to as admin/creator.
+        /// When non-zero, Davos's autonomous messages appear as the channel (channel name + avatar),
+        /// not your personal name. Get the numeric ID from the chat picker (type = "Channel").
+        /// Set to 0 to fall back to DM mode (TelegramOwnerChatId).
+        /// </summary>
+        public long TelegramOwnerChannelId { get; set; } = 0;
+        /// <summary>Daily character budget for inner monologue LLM calls (~4 chars per token). 0 = unlimited.</summary>
+        public int InnerVoiceBudgetDailyChars { get; set; } = 500_000;
+        /// <summary>Do-not-disturb start hour (24h local time, inclusive). Default: 23:00.</summary>
+        public int DndStartHour { get; set; } = 23;
+        /// <summary>Do-not-disturb end hour (24h local time, exclusive). Default: 08:00.</summary>
+        public int DndEndHour { get; set; } = 8;
+
         /// <summary>
         /// Load settings from disk, or return defaults if file doesn't exist.
         /// </summary>

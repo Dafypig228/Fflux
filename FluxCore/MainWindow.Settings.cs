@@ -184,13 +184,111 @@ namespace FluxCore
                 UpdateTelegramStatus();
             });
 
+            // Set owner IDs for autonomous outgoing messages
+            _telegram.OwnerChatId    = _settings.TelegramOwnerChatId;
+            _telegram.OwnerChannelId = _settings.TelegramOwnerChannelId;
+
             _ = Task.Run(async () =>
             {
                 await _telegram.StartAsync();
                 Dispatcher.InvokeAsync(UpdateTelegramStatus);
+
+                // Start Inner Voice after Telegram is connected (needs send capability)
+                if (_settings.InnerVoiceEnabled
+                    && (_settings.TelegramOwnerChatId != 0 || _settings.TelegramOwnerChannelId != 0)
+                    && _telegram.IsConnected && _brain != null && _dataLake != null
+                    && _coreMemory != null && _gemini != null && _cortex != null)
+                {
+                    Dispatcher.InvokeAsync(() => StartInnerVoice());
+                }
             });
 
             UpdateTelegramStatus();
+        }
+
+        private void StartInnerVoice()
+        {
+            try
+            {
+                // Tear down any previous instance
+                _innerVoice?.Dispose();
+                _innerVoice = null;
+
+                var state    = InnerVoice.InnerState.Load();
+                var drives   = new InnerVoice.DrivesEngine(state);
+                var privacy  = new InnerVoice.PrivacyFilter();
+                var composer = new InnerVoice.TelegramComposer(_telegram!);
+                var budget   = new InnerVoice.TokenBudget(_settings, state);
+                var guard    = new InnerVoice.AntiSpamGuard(_settings, _cortex!);
+
+                _innerVoice = new InnerVoice.InnerVoiceService(
+                    _gemini!,        // Gemini 2.5-Flash directly for best personality fidelity
+                    composer,
+                    _dataLake!,
+                    _coreMemory!,
+                    _brain!,
+                    drives,
+                    guard,
+                    budget,
+                    privacy,
+                    state);
+
+                // Wire drive events to user interactions
+                _brain!.OnMessage += (msg, isUser) =>
+                {
+                    if (isUser)
+                    {
+                        string? flushMsg = _innerVoice?.OnUserReturned();
+                        if (!string.IsNullOrWhiteSpace(flushMsg))
+                            Task.Run(() => composer.SendAsync(flushMsg));
+                    }
+                };
+
+                // Wire Telegram new-message to curiosity boost
+                _telegram!.OnNewMessage += kind => drives.OnNewObservation(kind);
+
+                // Wire OnThought → visible thought feed (newest first, cap at 50)
+                _innerVoice.OnThought += thought => Dispatcher.InvokeAsync(() =>
+                {
+                    InnerVoiceThoughts.Insert(0, new InnerThought
+                    {
+                        Time = DateTime.Now.ToString("HH:mm:ss"),
+                        Text = thought
+                    });
+                    // Trim oldest entries from the BOTTOM (index Count-1) — newest are at index 0
+                    while (InnerVoiceThoughts.Count > 50)
+                        InnerVoiceThoughts.RemoveAt(InnerVoiceThoughts.Count - 1);
+                });
+
+                // Wire OnStatus → status dot + label
+                _innerVoice.OnStatus += status => Dispatcher.InvokeAsync(() =>
+                {
+                    InnerStatusText.Text = status;
+                    InnerStatusDot.Fill  = status switch
+                    {
+                        "Thinking"                              => new SolidColorBrush(Color.FromRgb(0xFF, 0xD7, 0x00)), // #FFD700 gold
+                        "Sending"                               => new SolidColorBrush(Color.FromRgb(0x00, 0xFF, 0xD1)), // #00FFD1 cyan
+                        var s when s.StartsWith("Researching")  => new SolidColorBrush(Color.FromRgb(0xFF, 0x99, 0x44)), // #FF9944 orange
+                        _                                       => new SolidColorBrush(Color.FromArgb(64, 255, 255, 255))
+                    };
+                });
+
+                // Wire OnDrivesChanged → 4 drive ProgressBars
+                _innerVoice.OnDrivesChanged += snap => Dispatcher.InvokeAsync(() =>
+                {
+                    GaugeBoredom.Value     = snap.Boredom;
+                    GaugeCuriosity.Value   = snap.Curiosity;
+                    GaugeFrustration.Value = snap.Frustration;
+                    GaugeEnergy.Value      = snap.Energy;
+                });
+
+                _innerVoice.Start();
+                System.Diagnostics.Debug.WriteLine("[InnerVoice] Inner Voice started");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[InnerVoice] Failed to start: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -367,6 +465,6 @@ namespace FluxCore
             catch { }
         }
 
-        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); _ = _tts?.DisposeAsync().AsTask(); _ = _executor?.DisposeAsync(); _clipboardService?.Dispose(); _fileWatcher?.Dispose(); _gitWatcher?.Dispose(); _metrics?.Dispose(); _notifications?.Dispose(); _chromeBridge?.Dispose(); _eventLog?.Dispose(); _telegram?.Dispose(); _knowledgeGraph?.Dispose(); _dataLake?.Dispose(); }
+        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e) { if (!_isSecondary) { UnregisterHotKey(new WindowInteropHelper(this).Handle, HOTKEY_ID); SaveConfig(); } _audioService?.Dispose(); _ = _tts?.DisposeAsync().AsTask(); _ = _executor?.DisposeAsync(); _clipboardService?.Dispose(); _fileWatcher?.Dispose(); _gitWatcher?.Dispose(); _metrics?.Dispose(); _notifications?.Dispose(); _chromeBridge?.Dispose(); _eventLog?.Dispose(); _innerVoice?.Dispose(); _telegram?.Dispose(); _knowledgeGraph?.Dispose(); _dataLake?.Dispose(); }
     }
 }

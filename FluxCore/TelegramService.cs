@@ -38,6 +38,9 @@ namespace FluxCore
         private readonly object _lock = new();
         private const int MAX_RECENT = 50;
 
+        // Access hash cache for channels (populated lazily by GetAvailableChatsAsync)
+        private readonly Dictionary<long, long> _channelAccessHashes = new();
+
         // Optional services — set after construction
         public DataLakeService? DataLake { get; set; }
         public MemoryService?   Memory   { get; set; }
@@ -63,6 +66,23 @@ namespace FluxCore
         /// Empty = accept all DMs and groups (default). Non-empty = only the listed IDs.
         /// </summary>
         public HashSet<long> AllowedChatIds { get; set; } = new();
+
+        /// <summary>
+        /// Chat/user ID that Davos uses for autonomous outgoing messages.
+        /// Set from AppSettings.TelegramOwnerChatId (user's own Telegram user ID).
+        /// Leave 0 to disable autonomous sending.
+        /// </summary>
+        public long OwnerChatId { get; set; }
+
+        /// <summary>
+        /// Channel ID that Davos posts to as admin/creator.
+        /// When non-zero, overrides OwnerChatId — messages appear as the channel (channel name + avatar).
+        /// Set from AppSettings.TelegramOwnerChannelId.
+        /// </summary>
+        public long OwnerChannelId { get; set; }
+
+        /// <summary>Fired when a new incoming message is received (after ring buffer update).</summary>
+        public event Action<InnerVoice.ObservationKind>? OnNewMessage;
 
         /// <summary>Represents a single chat/DM/channel visible in the picker dialog.</summary>
         public record TgChatInfo(long Id, string Name, string Type);
@@ -257,7 +277,13 @@ namespace FluxCore
                             id = pc.chat_id; type = "Group";
                             break;
                         case PeerChannel pch:
-                            if (dialogs.chats.TryGetValue(pch.channel_id, out var ch)) name = ch.Title;
+                            if (dialogs.chats.TryGetValue(pch.channel_id, out var ch))
+                            {
+                                name = ch.Title;
+                                // Cache access hash — required for InputPeerChannel when sending
+                                if (ch is TL.Channel tch)
+                                    _channelAccessHashes[pch.channel_id] = tch.access_hash;
+                            }
                             id = pch.channel_id; type = "Channel";
                             break;
                     }
@@ -321,12 +347,90 @@ namespace FluxCore
                 if (_recent.Count > MAX_RECENT) _recent.RemoveAt(0);
             }
 
-            DataLake?.Write("telegram", msg.message, new { sender = senderName, chat = chatName });
+            long lakeId = DataLake?.Write("telegram", msg.message, new { sender = senderName, chat = chatName }) ?? 0;
 
             if (Memory != null)
-                _ = Memory.Save($"[Telegram] {senderName} in {chatName}: {msg.message}", "Telegram");
+                _ = Memory.SaveChunked($"[Telegram] {senderName} in {chatName}: {msg.message}", "Telegram",
+                    lakeId > 0 ? lakeId : null);
+
+            // Notify InnerVoice so curiosity can be boosted on new messages
+            OnNewMessage?.Invoke(InnerVoice.ObservationKind.TelegramTopic);
 
             return Task.CompletedTask;
+        }
+
+        // ── Autonomous sending ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Resolves InputPeerChannel for the given channel ID.
+        /// Access hash is fetched from cache; if not cached, calls GetAvailableChatsAsync() first.
+        /// Returns null if the channel cannot be found.
+        /// </summary>
+        private async Task<InputPeer?> ResolveChannelPeerAsync(long channelId)
+        {
+            if (!_channelAccessHashes.TryGetValue(channelId, out long hash))
+            {
+                // Populate cache by fetching all dialogs
+                await GetAvailableChatsAsync();
+                if (!_channelAccessHashes.TryGetValue(channelId, out hash))
+                {
+                    Log($"[Telegram] Channel {channelId} not found in dialogs — cannot send");
+                    return null;
+                }
+            }
+            return new InputPeerChannel(channelId, hash);
+        }
+
+        /// <summary>
+        /// Send a text message on behalf of Davos.
+        /// If OwnerChannelId is set, posts to the channel (message appears as the channel).
+        /// Otherwise falls back to OwnerChatId (user DM).
+        /// No-op if not connected or both IDs are 0.
+        /// </summary>
+        public async Task SendMessageAsync(string text)
+        {
+            if (_client == null || !IsConnected) return;
+            if (OwnerChannelId == 0 && OwnerChatId == 0) return;
+            try
+            {
+                InputPeer peer;
+                if (OwnerChannelId != 0)
+                {
+                    var cp = await ResolveChannelPeerAsync(OwnerChannelId);
+                    if (cp == null) return;
+                    peer = cp;
+                }
+                else
+                {
+                    peer = new InputPeerUser(OwnerChatId, 0);
+                }
+                await _client.Messages_SendMessage(peer, text, Helpers.RandomLong());
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TelegramSend] {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Sends a typing indicator (shows "typing…" in DM chats).
+        /// Skipped in channel mode — typing indicators are not visible to channel subscribers.
+        /// </summary>
+        public async Task SetTypingAsync()
+        {
+            if (_client == null || !IsConnected) return;
+            // Typing indicators are not visible in channels — only relevant for DMs
+            if (OwnerChannelId != 0) return;
+            if (OwnerChatId == 0) return;
+            try
+            {
+                var peer = new InputPeerUser(OwnerChatId, 0);
+                await _client.Messages_SetTyping(peer, new SendMessageTypingAction());
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TelegramTyping] {ex.Message}");
+            }
         }
 
         /// <summary>Returns recent messages formatted for LLM context injection.</summary>
