@@ -170,6 +170,25 @@ namespace FluxCore
                     // Safety handled by confidence gate (DestructiveCommands set + actionConfidence < 0.7)
                     return await _codeRunner.RunPowerShellAsync(cmdArg);
 
+                case "RUN_CSHARP":
+                case "CSHARP":
+                case "CS":
+                    if (_scriptGlobals == null)
+                        return new ExecutionResult(false, "ScriptGlobals not initialized — RUN_CSHARP unavailable");
+                    return await _codeRunner.RunCSharpAsync(cmdArg, _scriptGlobals);
+
+                case "START_BACKGROUND":
+                    return await _codeRunner.StartBackgroundAsync(cmdArg);
+
+                case "READ_LOG":
+                    return _codeRunner.ReadLog(cmdArg);
+
+                case "CHECK_BACKGROUND":
+                    return _codeRunner.CheckBackground(cmdArg);
+
+                case "STOP_BACKGROUND":
+                    return _codeRunner.StopBackground(cmdArg);
+
                 case "REJECT":
                     // Task is outside JarvisCore's domain. This case is a fallback —
                     // REJECT is normally caught at the loop level before command dispatch.

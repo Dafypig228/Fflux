@@ -286,6 +286,7 @@ namespace FluxCore
                 _chromeBridge.DataLake      = _dataLake;
                 _chromeBridge.Memory        = _memory;
                 _codeRunner.DataLake        = _dataLake;
+                _gemini.DataLake            = _dataLake; // Log all Gemini API calls → [my_api_calls]
 
                 // EventLog service (Phase F1)
                 _eventLog          = new EventLogService();
@@ -301,6 +302,9 @@ namespace FluxCore
                 // InitializeTelegram() handles create → wire → StartAsync → UpdateStatus
                 InitializeTelegram();
                 System.Diagnostics.Debug.WriteLine("[INIT] TelegramService starting...");
+
+                // Wire all services into ScriptGlobals so RUN_CSHARP scripts can access them
+                UpdateScriptGlobals();
 
                 // Register clipboard listener on main HWND
                 if (!_isSecondary)

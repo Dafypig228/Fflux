@@ -32,6 +32,10 @@ namespace FluxCore
         private readonly string _apiKey;
         private readonly HttpClient _httpClient = new HttpClient();
 
+        /// <summary>Set this to log every Gemini API call to DataLake (source "gemini_call").
+        /// Gives Davos verifiable self-knowledge of his own activity.</summary>
+        public DataLakeService? DataLake { get; set; }
+
         private const string Endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
         // ILLMService properties
@@ -114,7 +118,7 @@ namespace FluxCore
             });
 
             // 4. System instruction goes as a SEPARATE top-level field (Gemini API native)
-            return await SendPayload(contents, systemInstruction, temperature);
+            return await SendPayload(contents, systemInstruction, temperature, "chat");
         }
 
         // ==========================================
@@ -140,7 +144,7 @@ namespace FluxCore
         /// Sends payload to Gemini API with native system_instruction field.
         /// Includes exponential backoff retry for 429/503 errors.
         /// </summary>
-        private async Task<string> SendPayload(object contentsObj, string? systemInstruction = null, float temperature = 0.5f)
+        private async Task<string> SendPayload(object contentsObj, string? systemInstruction = null, float temperature = 0.5f, string callLabel = "response")
         {
             // Build the proper Gemini API payload:
             // {
@@ -265,6 +269,9 @@ namespace FluxCore
                         }
                     }
 
+                    // Log this call — Davos can verify his own activity via [my_api_calls]
+                    var finishTag = first.TryGetProperty("finishReason", out var fr2) ? fr2.GetString() ?? "STOP" : "STOP";
+                    DataLake?.Write("gemini_call", $"{callLabel} → {resultText.Length} chars [{finishTag}]");
                     return resultText;
                 }
 
@@ -379,7 +386,7 @@ namespace FluxCore
                     }
                 }
             };
-            return await SendPayload(contents, null, 0.1f);
+            return await SendPayload(contents, null, 0.1f, "transcribe");
         }
 
         public async Task<string> GenerateText(string prompt, float temperature = 0.5f)
@@ -392,7 +399,7 @@ namespace FluxCore
                     parts = new List<GeminiPart> { new GeminiPart { text = prompt } }
                 }
             };
-            return await SendPayload(contents, null, temperature);
+            return await SendPayload(contents, null, temperature, "inner_voice");
         }
 
         // ==========================================
@@ -431,10 +438,10 @@ namespace FluxCore
             object commitmentDecl = new
             {
                 name        = "commitment_add",
-                description = "Schedule a deferred action OR immediately deliver a message to the user. " +
-                              "ALWAYS use this for: anything with a time delay ('in 10 seconds', 'in 5 minutes', " +
-                              "'after X'), any request to 'write me', 'message me', 'remind me', 'contact me', " +
-                              "'send me something'. This is handled entirely inside Davos — zero Windows UI needed.",
+                description = "Schedule a deferred action: reminders, timers, delayed follow-ups. " +
+                              "Use for: anything with a time delay ('in 10 seconds', 'in 5 minutes', 'after X'), " +
+                              "requests to 'remind me', 'check back in X', 'follow up later'. " +
+                              "Do NOT use for immediate Telegram sends the user explicitly requested — those are execute_pc_task.",
                 parameters  = new
                 {
                     type       = "object",
@@ -458,11 +465,11 @@ namespace FluxCore
             object pcTaskDecl = new
             {
                 name        = "execute_pc_task",
-                description = "Execute a task requiring DIRECT WINDOWS UI CONTROL or SHELL SCRIPTING. " +
-                              "Use ONLY for: opening apps, clicking UI elements, typing, scrolling, " +
-                              "running PowerShell/Python scripts, managing files on disk, browser navigation. " +
-                              "NEVER use for: scheduling, timers, reminders, messaging the user, " +
-                              "or anything involving Telegram — those are commitment_add.",
+                description = "Execute a task on the user's PC — UI automation, shell scripting, or API calls. " +
+                              "Use for: opening apps, clicking UI elements, typing, scrolling, " +
+                              "running PowerShell/Python/C# scripts, managing files, browser navigation, " +
+                              "AND sending Telegram messages to specific chats via Globals.Telegram API. " +
+                              "NEVER use for: scheduling future actions, reminders, or timers — those are commitment_add.",
                 parameters  = new
                 {
                     type       = "object",
@@ -607,7 +614,14 @@ namespace FluxCore
                     }
                 }
 
-                return (textBuilder.ToString().Trim(), commitment, pcTask, injectCtx);
+                var resultText2 = textBuilder.ToString().Trim();
+                // Log this chat+tools call — Davos can verify his own activity via [my_api_calls]
+                DataLake?.Write("gemini_call",
+                    $"chat+tools → {resultText2.Length} chars" +
+                    $"{(commitment != null ? " [commitment]" : "")}" +
+                    $"{(pcTask != null ? " [pcTask]" : "")}" +
+                    $"{(injectCtx != null ? " [injectCtx]" : "")}");
+                return (resultText2, commitment, pcTask, injectCtx);
             }
             catch (TaskCanceledException)
             {

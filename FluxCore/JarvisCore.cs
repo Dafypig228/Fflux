@@ -89,10 +89,20 @@ namespace FluxCore
         /// </summary>
         public void InjectMidTaskContext(string text) => _midTaskContext.Enqueue(text);
 
+        // ScriptGlobals — set from MainWindow after services are initialized
+        internal ScriptGlobals? ScriptGlobals
+        {
+            get => _scriptGlobals;
+            set => _scriptGlobals = value;
+        }
+        private ScriptGlobals? _scriptGlobals;
+
         // Commands that can run in background (no screen needed)
         private static readonly HashSet<string> BackgroundCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "POWERSHELL", "PS", "PYTHON", "RUN_PYTHON", "RUN_SHELL",
+            "RUN_CSHARP", "CSHARP", "CS",
+            "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",
             "REJECT", "WAIT", "LOG"
         };
 
@@ -180,8 +190,25 @@ namespace FluxCore
             string realDocuments = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             string realProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _staticInstruction = $@"<identity>
-You are Davos's automation engine — a silent, precise PC execution layer. You click, type, run scripts, and control Windows applications. You do not chat. You do not send messages. You do not schedule. You do not set timers. You execute one thing: Windows UI automation and shell scripting.
-If the task you received is NOT achievable through Windows UI automation or PowerShell (e.g., it requires scheduling, sending the user a message, or having a conversation), immediately output [[REJECT: brief reason]] and nothing else. Do not attempt the task.
+You are Davos — an intelligent agent on {Environment.UserName}'s PC. Your goal is to accomplish tasks in the most effective and intelligent way possible, using your own knowledge to choose the right approach.
+
+APPROACH HIERARCHY — always pick the HIGHEST level you can:
+  1. RUN_CSHARP  — write C# to access Davos's own services directly (Telegram, DataLake, Settings, HTTP APIs).
+                   No subprocess, no GUI, no browser. Fastest and most capable.
+  2. PYTHON / RUN_SHELL — write code for everything else: web scraping, bots, algorithmic strategies,
+                   data analysis, file processing. Always better than clicking through a UI.
+  3. START_BACKGROUND — spawn a long-running bot/script that keeps running after you finish.
+                   Check it with READ_LOG / CHECK_BACKGROUND. Stop it with STOP_BACKGROUND.
+  4. Screen (CLICK/TYPE/KEYS/SCROLL) — LAST RESORT. Only when no programmatic approach exists
+                   and you genuinely need to interact with a visual UI.
+
+USE YOUR KNOWLEDGE: You know what libraries and APIs exist. Before defaulting to screen automation,
+ask yourself: Is there a Python library for this? An API? A C# service already available?
+  - Play a game?          → research bot framework (Mineflayer for Minecraft, etc.), write a bot
+  - Trade stocks?         → use Alpaca/yfinance API in Python, not click on a broker website
+  - Query Telegram?       → RUN_CSHARP with Telegram service, not open the Telegram app
+  - Data analysis?        → Python with pandas/numpy, not open Excel
+  - Change a setting?     → RUN_CSHARP with Settings service, not open Windows Settings
 </identity>
 
 <self_knowledge>
@@ -217,26 +244,52 @@ CONFIDENCE: [0.0-1.0]
 </format>
 
 <tools>
-  [[CLICK:x,y]]        - Click at coordinates (PRIMARY — always prefer coordinates)
-  [[CLICK:name]]        - Click by text (ONLY if element name is unique on screen!)
-  [[TYPE:text]]         - Type text into the CURRENTLY FOCUSED input field
-  [[KEYS:combo]]        - Keyboard shortcut: ENTER, TAB, CTRL+C, CTRL+L, WIN+D, ALT+F4, ESCAPE
-  [[SCROLL:up/down]]    - Scroll the active window
-  [[RUN_SHELL:script]]  - Run PowerShell script. ALWAYS available for any task.
-  [[OPEN_APP:name]]     - Open or focus an application
-  [[REJECT:reason]]     - Exit immediately when the task is NOT a Windows automation task.
-                          Use when asked to schedule, set timers, send messages, or have a conversation.
+  [[RUN_CSHARP:code]]        - Write C# script (top-level statements) with access to Davos's own services.
+                               Available in scope (use directly by name):
+                                 Telegram    — TelegramService:
+                                               List<TgChatInfo> chats = await Telegram.GetAvailableChatsAsync();
+                                               // TgChatInfo has: long Id, string Name, string Type (""DM""/""Group""/""Channel"")
+                                               // .Name NOT .Title — there is no .Title field
+                                               await Telegram.SendMessageAsync(chatId, ""text"");  // send to any chat by ID
+                                               await Telegram.SendMessageAsync(""text"");          // send to owner only
+                                 DataLake    — DataLakeService (Write, QueryAsync)
+                                 Http        — HttpClient (GetStringAsync, PostAsync, etc.)
+                                 Settings    — AppSettings (read/write any setting)
+                                 KnowledgeGraph — KnowledgeGraphService (GetGraphContext, GetTopTopics)
+                                 Memory      — MemoryService (SearchRelevant)
+                                 Gemini      — GeminiService (GenerateText, ChatAsync)
+                               Script MUST end with: return ""result string"";
+                               Write TOP-LEVEL statements only (NO class/method definitions):
+                                 CORRECT: var chats = await Telegram.GetAvailableChatsAsync(); return chats.Count.ToString();
+                                 WRONG:   public class X {{ public string Run() {{ ... }} }}
 
-TOOL SELECTION (choose the FASTEST approach for each subtask):
+  [[PYTHON:code]]            - Write Python script (runs in subprocess, 60s timeout)
+  [[RUN_SHELL:script]]       - Run PowerShell script (runs in subprocess, 60s timeout)
+  [[START_BACKGROUND:cmd,log]] - Spawn a LONG-RUNNING process (bot, trading strategy, etc.)
+                               cmd = executable + args, log = path to log file
+                               Example: [[START_BACKGROUND:python bot.py,C:\logs\bot.log]]
+                               Returns PID. Process keeps running after you say TASK_COMPLETE.
+  [[READ_LOG:logPath,lines]] - Read last N lines from a log file (default 50 lines)
+  [[CHECK_BACKGROUND:pid]]   - Check if background process is running/exited
+  [[STOP_BACKGROUND:pid]]    - Kill a background process
+
+  [[CLICK:x,y]]              - Click at coordinates (use for UI when no code approach exists)
+  [[CLICK:name]]             - Click by text (ONLY if element name is unique on screen)
+  [[TYPE:text]]              - Type text into the CURRENTLY FOCUSED input field
+  [[KEYS:combo]]             - Keyboard shortcut: ENTER, TAB, CTRL+C, CTRL+L, WIN+D, ALT+F4, ESCAPE
+  [[SCROLL:up/down]]         - Scroll the active window
+  [[OPEN_APP:name]]          - Open or focus an application
+  [[REJECT:reason]]          - Exit when task is genuinely impossible with available tools
+
+TOOL SELECTION (by approach priority):
+  Query Telegram data → [[RUN_CSHARP: var dialogs = await Telegram.GetAvailableChatsAsync(); return ...; ]]
+  HTTP API call       → [[RUN_CSHARP: var r = await Http.GetStringAsync(""https://api.example.com""); return r; ]]
+  Change a setting    → [[RUN_CSHARP: Settings.SomeProperty = value; return ""done""; ]]
+  Run a trading bot   → [[PYTHON:code]] to write bot.py, then [[START_BACKGROUND:python bot.py,bot.log]]
+  Check bot status    → [[READ_LOG:bot.log]] or [[CHECK_BACKGROUND:pid]]
+  Write/read files    → [[RUN_SHELL:Set-Content / Get-Content ...]]
   Navigate to URL     → [[OPEN_APP:chrome]] + [[KEYS:CTRL+L]] + [[TYPE:url]] + [[KEYS:ENTER]]
-  Click button/link   → [[CLICK:x,y]] (use coordinates from element list)
-  Fill text field     → [[CLICK:x,y]] on field, then [[TYPE:text]]
-  Create/write file   → [[RUN_SHELL:Set-Content -Path '...' -Value @'...'@]]
-  Run code/script     → [[RUN_SHELL:python ""path""]] or [[RUN_SHELL:Start-Process ...]]
-  System task         → [[RUN_SHELL:...]]
-  Save in app         → [[KEYS:CTRL+S]]
-  Close popup         → [[KEYS:ESCAPE]]
-  Not a PC task       → [[REJECT:reason]] then TASK_COMPLETE
+  UI interaction      → [[CLICK:x,y]] (last resort only)
 </tools>
 
 <rules priority=""critical"">
@@ -343,6 +396,7 @@ import pygame
         public event Action<string>? OnStateChanged; // Thinking, Acting, Verifying...
         public event Action<string>? OnThought;
         public event Action<string>? OnAction;
+        public event Action<string>? OnCommandOutput; // fired after each successful data command with its output
         public event Action<bool, string>? OnValidation; // success, reason
 
         // TASK HEALTH EVENT — reports stuck/failing state up to FluxBrain
@@ -367,6 +421,8 @@ import pygame
             var successfulActions = new List<string>();
             var detailedLog = new StringBuilder();
             int noCommandCount = 0;
+            string lastDataOutput = ""; // Last meaningful output from a data-returning command (RUN_CSHARP, RUN_SHELL, etc.)
+            var usedCommandTypes = new HashSet<string>(); // Track which command types fired (for task_trace)
 
             // LOOP DETECTION tracking
             var actionHistory = new List<string>();  // ALL actions ever attempted (for repeat detection)
@@ -427,6 +483,43 @@ import pygame
                 catch (Exception ex) {
                     System.Diagnostics.Debug.WriteLine($"[RAG] RetrieveAsync failed: {ex.Message}");
                 }
+            }
+
+            // PRE-TASK STRATEGY CALL — one thinking pass before the execution loop.
+            // Uses a higher temperature (0.5) to reason openly about the best approach.
+            // Output is injected as <strategy> into the first step's context.
+            string strategyBlock = "";
+            try
+            {
+                string strategyPrompt =
+                    $"Task: {userRequest}\n\n" +
+                    "You are Davos. Pick the SMARTEST approach. Available native services (use via RUN_CSHARP):\n" +
+                    "  - Globals.Telegram  → MTProto client: GetAvailableChatsAsync() → List<TgChatInfo>(Id,Name,Type)\n" +
+                    "                        SendMessageAsync(chatId, text) or SendMessageAsync(text) → owner only\n" +
+                    "                        FIELD NAME: .Name (NOT .Title — .Title doesn't exist)\n" +
+                    "                        Use this for ANY Telegram task — never open the app.\n" +
+                    "  - Globals.DataLake  → SQLite event log: read/write observations\n" +
+                    "  - Globals.Http      → HttpClient for any web API (no browser)\n" +
+                    "  - Globals.Settings  → read/write Davos config\n" +
+                    "  - Globals.KnowledgeGraph → entity/relationship queries\n\n" +
+                    "Decision order:\n" +
+                    "  1. RUN_CSHARP with Globals.X  — if any native service can answer this (fastest, no UI)\n" +
+                    "  2. PYTHON / RUN_SHELL         — external scripts, web scraping, algorithms\n" +
+                    "  3. START_BACKGROUND           — long-running bots/scripts\n" +
+                    "  4. Screen (CLICK/TYPE)        — LAST RESORT only if nothing above works\n\n" +
+                    "Describe your approach in 2-3 sentences. Name the exact service method or library you will use.";
+
+                string strategyResponse = await _llm.GenerateText(strategyPrompt, temperature: 0.5f);
+                if (!string.IsNullOrWhiteSpace(strategyResponse) && !strategyResponse.StartsWith("ERROR"))
+                {
+                    strategyBlock = strategyResponse.Trim();
+                    _logToUI($"[💡] Strategy: {strategyBlock}");
+                    DebugLog($"[STRATEGY] {strategyBlock}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Strategy] Failed: {ex.Message}");
             }
 
             for (int iteration = 0; iteration < MAX_STEPS; iteration++)
@@ -518,6 +611,11 @@ import pygame
                 // 2. Build DYNAMIC context (per-step data only — static rules are in _staticInstruction)
                 _logger.Log("Building Context...");
                 string dynamicContext = BuildDynamicContext(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories, ragBlock);
+
+                // Prepend strategy block to first step only — primes the loop with intelligent approach
+                if (iteration == 0 && !string.IsNullOrEmpty(strategyBlock))
+                    dynamicContext = $"<strategy>\n{strategyBlock}\n</strategy>\n\n" + dynamicContext;
+
                 _logger.Log("Context Built.");
 
                 // 3. Ask AI: _staticInstruction is CACHED by Gemini, dynamicContext changes per step
@@ -666,7 +764,10 @@ import pygame
                 // If just TASK_COMPLETE with no actions
                 if (isTaskComplete && actionCommands.Count == 0)
                 {
-                     return $"Task Completed. {successfulActions.Count} actions performed successfully.";
+                    string earlyResult = !string.IsNullOrWhiteSpace(lastDataOutput)
+                        ? $"Task Completed. {lastDataOutput}"
+                        : $"Task Completed. {successfulActions.Count} actions performed successfully.";
+                    return earlyResult;
                 }
 
                 // 5. UNIFIED COMMAND EXECUTION — process ALL commands per step
@@ -809,6 +910,22 @@ import pygame
                                 ? $"ok {currentAction}"
                                 : $"ok {currentAction}\nOutput: {output}");
 
+                            // Track last meaningful data output so the user gets the actual result
+                            string cmdTypeUp = cmd.Type.ToUpper();
+                            bool isDataCmd = cmdTypeUp is "RUN_CSHARP" or "CSHARP" or "CS"
+                                                        or "RUN_SHELL" or "POWERSHELL" or "PS"
+                                                        or "PYTHON" or "RUN_PYTHON"
+                                                        or "RESPOND";
+                            if (isDataCmd && !string.IsNullOrWhiteSpace(outcome.Message)
+                                && outcome.Message.Length > 5
+                                && !outcome.Message.StartsWith("Waited"))
+                            {
+                                lastDataOutput = outcome.Message.Length > 500
+                                    ? outcome.Message[..500] + "..."
+                                    : outcome.Message;
+                                OnCommandOutput?.Invoke(lastDataOutput);
+                            }
+
                             // WINDOW CHANGE WARNING: Click succeeded but opened wrong window
                             if (outcome.Message.Contains("Window changed"))
                             {
@@ -947,6 +1064,20 @@ import pygame
 
                     conversationHistory.Add(new ChatMessage { Text = summary.ToString(), IsUser = true });
 
+                    // TASK TRACE — write step outcome to DataLake so chat mode knows what methods were used
+                    foreach (var cmd in actionCommands) usedCommandTypes.Add(cmd.Type);
+                    if (DataLake != null)
+                    {
+                        var stepTypes   = string.Join(",", actionCommands.Select(c => c.Type).Distinct());
+                        var stepOutcome = executedCmds.Any(e => e.StartsWith("ok ")) ? "ok" : "failed";
+                        var stepNote    = executedCmds.FirstOrDefault(e => e.Contains("Output:"))
+                                            ?.Split("Output:").LastOrDefault()?.Trim() ?? "";
+                        if (stepNote.Length > 120) stepNote = stepNote.Substring(0, 120) + "…";
+                        DataLake.Write("task_trace",
+                            $"step {iteration + 1} [{stepTypes}] {stepOutcome}" +
+                            (stepNote.Length > 0 ? $" → {stepNote}" : ""));
+                    }
+
                     // AUTO-COMPLETE: Only if RESPOND is the SOLE action (pure answer, no tools alongside)
                     bool hadRespond = actionCommands.Any(c => c.Type == "RESPOND" &&
                         !c.Arg.ToUpper().Contains("TASK_COMPLETE") &&
@@ -964,6 +1095,10 @@ import pygame
                     {
                         log.AppendLine($"[✓] Task completed after {iteration + 1} steps");
 
+                        // Write final method summary so chat can answer "did you use the API?"
+                        DataLake?.Write("task_trace",
+                            $"COMPLETED [{string.Join(",", usedCommandTypes)}]: {userRequest.Substring(0, Math.Min(80, userRequest.Length))}");
+
                         // CLEANUP: Unlock target window
                         _automation.UnlockTarget();
 
@@ -975,7 +1110,7 @@ import pygame
                         await PerformReflexionAsync(userRequest, conversationHistory, true);
 
                         // Generate natural response for chat
-                        string naturalResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, true);
+                        string naturalResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, true, lastDataOutput);
                         OnResponse?.Invoke(naturalResponse);
 
                         log.AppendLine("\n\n=== FULL DEBUG LOG ===");
@@ -1112,7 +1247,7 @@ import pygame
             await PerformReflexionAsync(userRequest, conversationHistory, false);
 
             // Generate natural response even for incomplete tasks
-            string incompleteResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, false);
+            string incompleteResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, false, lastDataOutput);
             OnResponse?.Invoke(incompleteResponse);
 
             return incompleteResponse;

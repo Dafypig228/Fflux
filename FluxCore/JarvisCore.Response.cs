@@ -87,7 +87,7 @@ LESSON: <the rule>
         /// <summary>
         /// Generates a natural language response for the chat instead of raw logs.
         /// </summary>
-        private string GenerateNaturalResponse(string userRequest, List<string> successes, List<string> failures, bool completed)
+        private string GenerateNaturalResponse(string userRequest, List<string> successes, List<string> failures, bool completed, string lastOutput = "")
         {
             var sb = new StringBuilder();
 
@@ -136,7 +136,11 @@ LESSON: <the rule>
                 }
             }
 
-            return sb.ToString();
+            // If the task produced actual data (RUN_CSHARP result, shell output, etc.), surface it
+            if (!string.IsNullOrWhiteSpace(lastOutput))
+                sb.Append($"\n{lastOutput}");
+
+            return sb.ToString().Trim();
         }
 
         /// <summary>

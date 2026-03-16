@@ -147,6 +147,7 @@ namespace FluxCore
             _telegram.DataLake = _dataLake;
             _telegram.Memory   = _memory;
             _jarvis.Telegram   = _telegram;
+            UpdateScriptGlobals(); // Expose new Telegram instance to RUN_CSHARP scripts
 
             // Restore saved chat filter (empty = all DMs + groups, no channels)
             if (_settings.TelegramChatIds?.Count > 0)
@@ -204,6 +205,25 @@ namespace FluxCore
             });
 
             UpdateTelegramStatus();
+        }
+
+        /// <summary>
+        /// Rebuilds and assigns ScriptGlobals to JarvisCore so RUN_CSHARP scripts
+        /// have access to all currently-initialized services.
+        /// Call any time a service is (re-)initialized (e.g., after Telegram reconnects).
+        /// </summary>
+        internal void UpdateScriptGlobals()
+        {
+            if (_jarvis == null) return;
+            _jarvis.ScriptGlobals = new ScriptGlobals
+            {
+                Telegram       = _telegram,
+                DataLake       = _dataLake,
+                KnowledgeGraph = _knowledgeGraph,
+                Memory         = _memory,
+                Settings       = _settings,
+                Gemini         = _gemini,
+            };
         }
 
         private void StartInnerVoice()

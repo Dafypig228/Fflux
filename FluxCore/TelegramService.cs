@@ -41,6 +41,9 @@ namespace FluxCore
         // Access hash cache for channels (populated lazily by GetAvailableChatsAsync)
         private readonly Dictionary<long, long> _channelAccessHashes = new();
 
+        // Peer type cache ("DM" / "Group" / "Channel") — populated by GetAvailableChatsAsync
+        private readonly Dictionary<long, string> _chatTypeCache = new();
+
         // Optional services — set after construction
         public DataLakeService? DataLake { get; set; }
         public MemoryService?   Memory   { get; set; }
@@ -288,7 +291,10 @@ namespace FluxCore
                             break;
                     }
                     if (id != 0 && !string.IsNullOrEmpty(name))
+                    {
                         result.Add(new TgChatInfo(id, name, type));
+                        _chatTypeCache[id] = type;
+                    }
                 }
                 return result;
             }
@@ -410,6 +416,33 @@ namespace FluxCore
             {
                 System.Diagnostics.Debug.WriteLine($"[TelegramSend] {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Send a text message to any chat by its Telegram ID.
+        /// Get IDs from GetAvailableChatsAsync() — TgChatInfo.Id is the key.
+        /// Peer type (DM/Group/Channel) is resolved from _chatTypeCache populated by GetAvailableChatsAsync.
+        /// If the chat wasn't fetched yet, defaults to InputPeerUser (works for regular DMs).
+        /// </summary>
+        public async Task SendMessageAsync(long chatId, string message)
+        {
+            if (_client == null || !IsConnected)
+                throw new InvalidOperationException("Telegram not connected");
+
+            // Auto-populate cache if this chatId hasn't been fetched yet
+            if (!_chatTypeCache.ContainsKey(chatId))
+                await GetAvailableChatsAsync();
+
+            _chatTypeCache.TryGetValue(chatId, out var type);
+            InputPeer peer = type switch
+            {
+                "Channel" when _channelAccessHashes.TryGetValue(chatId, out var h)
+                          => new InputPeerChannel(chatId, h),
+                "Group"   => new InputPeerChat(chatId),
+                _         => new InputPeerUser(chatId, 0)
+            };
+            // Let exceptions propagate — callers (RUN_CSHARP) need to see real errors
+            await _client.Messages_SendMessage(peer, message, Helpers.RandomLong());
         }
 
         /// <summary>

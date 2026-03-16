@@ -100,9 +100,14 @@ namespace FluxCore
             var commandTypes = new[] {
                 // Primary (advertised in prompt)
                 "CLICK", "TYPE", "KEYS", "SCROLL", "RUN_SHELL", "OPEN_APP", "RESPOND",
+                // Scripting & background process management
+                "RUN_CSHARP", "CSHARP", "CS",
+                "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",
                 // Legacy aliases (not in prompt, still parsed for backward compat)
                 "HIDE_SELF", "MINIMIZE_SELF", "POWERSHELL", "PS", "RUN_PYTHON", "PYTHON",
-                "WAIT", "LOG", "WINDOW"
+                "WAIT", "LOG", "WINDOW", "DRAG", "DRAGGING",
+                "CLICKING", "LAUNCHING", "OPENING", "TYPING",
+                "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO", "REJECT"
             };
 
             foreach (var cmdType in commandTypes)
@@ -140,7 +145,9 @@ namespace FluxCore
                     // Strategy: prefer ]] followed by command markers over ]] followed by plain newline.
                     // For plain ]]\n, use the LAST match (closest to actual command end), not the first.
                     bool isScript = cmdType == "RUN_SHELL" || cmdType == "POWERSHELL" || cmdType == "PS" ||
-                                    cmdType == "RUN_PYTHON" || cmdType == "PYTHON" || cmdType == "TYPE";
+                                    cmdType == "RUN_PYTHON" || cmdType == "PYTHON" || cmdType == "TYPE" ||
+                                    cmdType == "RUN_CSHARP" || cmdType == "CSHARP" || cmdType == "CS" ||
+                                    cmdType == "START_BACKGROUND";
                     if (isScript)
                     {
                         int bestEnd = -1;
