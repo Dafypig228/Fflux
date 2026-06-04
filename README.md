@@ -1,5 +1,7 @@
 # Davos (FluxCore)
 
+> Currently undone. 
+
 > A self-aware AI companion that lives on your Windows desktop, watches everything you do, thinks autonomously, executes tasks, modifies its own code, and messages you on Telegram when it has something to say.
 
 ---
