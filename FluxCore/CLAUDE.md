@@ -1,48 +1,75 @@
-# FluxCore Prompt System — Fix Instructions
+# FluxCore ("Davos") — guide for AI sessions
 
-## Project Context
-This is a C# WPF AI assistant called "Davos" (FluxCore). The prompt system spans multiple files. Key files:
-- `JarvisCore.cs` — Main task execution system prompt (`_staticInstruction`, lines 148-279)
-- `JarvisCore.Context.cs` — Per-step dynamic context builder (`BuildDynamicContext`)
-- `FluxBrain.cs` — Intent classifier prompt (line 223) + Chat prompt (line 342)
-- `ReflectionAgent.cs` — Failure analysis prompt
-- `OrchestratorAgent.cs` — **Deprecated, to be deleted**
+C# WPF (.NET 10) AI companion on Windows. Gemini 2.5 Flash backend.
+This file states the **invariants**. If code contradicts this file, the code wins — then fix this file.
+When a session changes an invariant, it MUST update this file in the same change.
 
-## Fixes To Apply
+## Architecture (the only live pipeline)
 
-### 1. Restructure `_staticInstruction` with XML sections (JarvisCore.cs)
-Wrap the system prompt in clear XML-tagged sections: `<identity>`, `<tools>`, `<rules priority="critical">`, `<rules>`, `<examples>`, `<forbidden>`, `<paths>`. This helps Gemini index sections and reduces instruction-following failures. Keep the same content, just add structure.
-
-### 2. Deduplicate rules across prompts
-The rule "use CLICK:x,y coordinates, not names" appears in BOTH `_staticInstruction` AND `BuildDynamicContext` (line 51). Remove it from `BuildDynamicContext` — the static instruction already covers it. Apply this principle to any rule that appears in both static and dynamic context.
-
-### 3. Fix chat NEED_REROUTE anti-pattern (FluxBrain.cs)
-In `HandleChatAsync` (line 342-369), the chat prompt says "NEVER output commands" but then asks the LLM to output `NEED_REROUTE`. Fix by:
-- Remove the NEED_REROUTE instruction from the chat system prompt entirely
-- Remove the `NEED_REROUTE` detection block in `HandleChatAsync` (lines 390-395)
-- The classifier in `FluxBrain.ClassifyIntentAsync` already handles routing correctly — trust it
-
-### 4. Delete OrchestratorAgent.cs
-This file is fully superseded by `FluxBrain`. It uses hardcoded keyword arrays in `ShouldUsePlanning()` — the exact anti-pattern `FluxBrain` correctly avoids. Delete the file and remove any references to it.
-
-### 5. Add recovery alternatives in BuildDynamicContext (JarvisCore.Context.cs)
-After the failures section (around line 41), add a conditional block when `failures.Count >= 3`:
-```csharp
-if (failures.Count >= 3)
-{
-    sb.AppendLine("\n💡 ALTERNATIVE STRATEGIES (pick one you haven't tried):");
-    sb.AppendLine("  1. Use [[RUN_SHELL:...]] instead of UI clicks");
-    sb.AppendLine("  2. Use [[KEYS:TAB]] + [[KEYS:ENTER]] for keyboard navigation");
-    sb.AppendLine("  3. [[SCROLL:down]] to reveal hidden elements");
-    sb.AppendLine("  4. [[OPEN_APP:...]] to refocus the correct window");
-}
+```
+User → FluxBrain (chat + Gemini native function calling; routes via execute_pc_task / commitment_add / inject_task_context)
+     → JarvisCore.ExecuteTaskAsync (step loop: screenshot + UIA elements → LLM → [[COMMAND:arg]] execution)
+     → WindowsAutomationAgent (CLICK/TYPE/KEYS/SCROLL) | CodeExecutionAgent (RUN_SHELL/PYTHON/RUN_CSHARP) | ExecutionAgent (OPEN_APP, Playwright)
 ```
 
-### 6. Remove screenshot from ReflectionAgent (ReflectionAgent.cs)
-In `AnalyzeFailureAsync`, remove the screenshot parameter from the LLM call and remove "Look at the screenshot" from the prompt. The JSON schema (alternative/retry/abort) doesn't use visual data anyway, and `ValidatorAgent` already handles visual verification separately.
+There is exactly ONE command pipeline (JarvisCore). A legacy duplicate in
+MainWindow.Permissions.cs was deleted (see `.cleanup-backup\`). Do not add a second one.
 
-## Rules for These Changes
-- Do NOT change any command execution logic, only prompt text and dead code removal
-- Preserve all existing command types and their parsing in `ExtractAllCommands`
-- Keep temperature values as they are (0.2 task, 0.7 chat, 0.1 classifier, 0.3 reflexion)
-- Test that the project still builds after changes (`dotnet build`)
+## Invariants — breaking these reintroduces fixed bugs
+
+1. **Command registry must stay in sync in 3 places** (a mismatch = silent failure):
+   - advertised: `_staticInstruction` `<tools>` in JarvisCore.cs
+   - parsed: `ExtractAllCommands` in JarvisCore.Context.cs
+   - executed: `ExecuteSingleCommandAsync` switch in JarvisCore.Commands.cs
+   Every advertised command MUST have an executor case (RESPOND was once advertised but not executable — every "final answer" was lost).
+
+2. **Coordinate spaces**: the AI thinks in SCREENSHOT SPACE (50% of logical pixels).
+   Click handlers multiply incoming coords ×2. ANY coordinate shown to the AI
+   (element lists, error messages, success messages) must be ÷2. No DPI math anywhere.
+
+3. **Completion protocol**: `TASK_COMPLETE` / `TASK_FAILED` are TEXT FLAGS (not `[[...]]` commands),
+   detected in the ACTION section. They are different outcomes — never merge them.
+   `[[RESPOND:text]]` is the model's final answer; a RESPOND-only step auto-completes.
+   All terminal returns in ExecuteTaskAsync go through `FinalizeTask()` (unlock, trace,
+   reinforce, reflexion, OnResponse). Early returns that skip it must call `UnlockTarget()`.
+
+4. **Messaging**: FluxBrain owns user-facing chat messages (OnMessage). JarvisCore's
+   OnResponse is HUD-reset only in MainWindow — do NOT also AddMessage there (duplicates).
+
+5. **Gemini calls**: `thinkingConfig.thinkingBudget = 0` in GeminiService payloads.
+   Removing it re-enables hidden thinking and makes every step take seconds longer.
+
+6. **Memory hygiene**: Hippocampus lessons are only learned from CLICK/OPEN_APP failures,
+   never from script failures (that poisoned memory with "use CLICK instead of shell" garbage).
+   Recall has a 0.2 confidence floor.
+
+7. **Visual validation** runs on SUCCESSFUL screen commands (catching silent failures),
+   never on failed ones. Depths: Fast = off, Normal = CLICK/TYPE, Thorough = all screen commands.
+
+8. **Retries**: script commands (RUN_SHELL/PYTHON/RUN_CSHARP) execute ONCE — no blind re-runs
+   (side effects + 60s timeout each). Retries are for UI commands only. No hidden UI mutations
+   (e.g. scrolling) inside retry logic — the AI decides scrolling explicitly.
+
+9. **Secrets**: Gemini key comes from `%APPDATA%\Davos\settings.json` (`GeminiApiKey`)
+   or `GEMINI_API_KEY` env var. NEVER hardcode keys in source — it has leaked twice already.
+
+10. **Grounding**: if the model needs a capability that doesn't exist, the fix is to ADD a real
+    capability (service + prompt doc in `<tools>`/`<grounding>`), not prompt exhortations.
+    Chrome pages: `Chrome.GetRecentPages()` (extension bridge). Chrome has no COM API.
+    Proven screen route for tabs: CTRL+SHIFT+A (Chrome tab-search overlay).
+
+## Known intentionally-dead / aspirational areas
+
+- `Swarm\` is reachable only via `FluxBrain.ExecuteAutonomousResearchAsync` (InnerVoice).
+- `SelfCoding\`, `OrchestratorAgent.cs`, `ChatAssistant.cs`, `Architecture.cs` were deleted
+  (unreachable); restore from `.cleanup-backup\` only with a real entry point.
+- The C++ ImGui overlay (FluxCore.vcxproj) is a separate experiment, not part of the WPF app.
+
+## Verify after changes
+
+```
+dotnet build FluxCore\FluxCore.csproj
+```
+
+Build must be 0 errors. There are no tests yet — if you add protocol logic, add a test
+that walks every advertised command through parse + execute.

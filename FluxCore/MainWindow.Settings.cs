@@ -85,7 +85,7 @@ namespace FluxCore
 
             if (_settings.TtsEnabled && _tts == null)
             {
-                _tts = new GeminiTtsService(API_KEY, _settings.TtsVoice);
+                _tts = new GeminiTtsService(ResolveGeminiApiKey(), _settings.TtsVoice);
                 _tts.OnError += (err) => Dispatcher.InvokeAsync(() => LogMessage($"[TTS Error] {err}"));
                 _ = _tts.ConnectAsync();
                 _brain!.OnMessage += (text, isUser) => { if (!isUser) _ = _tts.SpeakAsync(text); };
@@ -223,6 +223,7 @@ namespace FluxCore
                 Memory         = _memory,
                 Settings       = _settings,
                 Gemini         = _gemini,
+                Chrome         = _chromeBridge,
             };
         }
 

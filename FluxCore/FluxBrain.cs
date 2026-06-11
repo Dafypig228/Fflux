@@ -63,7 +63,6 @@ namespace FluxCore
         // --- UI Callbacks ---
         public event Action<string, bool>? OnMessage;        // text, isUser
         public event Action<string>? OnStatusChanged;
-        public event Action? OnHideWindow;                   // Hide Flux before screenshots
         public event Action? OnShowWindow;                   // Show Flux after task completes
 
         // --- Confidence-Based Decision Making ---
@@ -645,41 +644,6 @@ Execute the commitment naturally. Do not explain you're on a schedule — just d
             }, ct);
         }
 
-        /// <summary>Handle a question about a running/recent task.</summary>
-        private async Task HandleTaskQueryAsync(BrainRequest request, ClassifiedIntent intent, CancellationToken ct)
-        {
-            if (_runningTasks.IsEmpty)
-            {
-                OnMessage?.Invoke("No tasks are running right now. What would you like me to do?", false);
-                return;
-            }
-
-            // Build task status report
-            var sb = new StringBuilder();
-            foreach (var task in _runningTasks.Values)
-            {
-                var duration = (task.CompletedAt ?? DateTime.UtcNow) - task.StartedAt;
-                sb.AppendLine($"[{task.Id}] {task.Description}");
-                sb.AppendLine($"  Status: {task.Status}");
-                sb.AppendLine($"  Duration: {duration.TotalSeconds:F0}s");
-                if (task.Result != null)
-                    sb.AppendLine($"  Result: {task.Result[..Math.Min(200, task.Result.Length)]}");
-            }
-
-            // Use Gemini to generate a natural answer about the tasks
-            string queryPrompt = $@"The user is asking about running tasks. Answer naturally and concisely in the same language the user uses.
-
-TASKS:
-{sb}
-
-USER ASKS: ""{request.Text}""
-
-Your response:";
-
-            string response = await _llm.GenerateText(queryPrompt, 0.5f);
-            OnMessage?.Invoke(response, false);
-        }
-
         /// <summary>
         /// Stops the most recently started active task.
         /// Writes Cancel signal FIRST so JarvisCore's catch block can read the reason,
@@ -746,126 +710,11 @@ Your response:";
             return words.Length <= 5 && words.Any(w => _stopWords.Contains(w));
         }
 
-        /// <summary>Handle a complex multi-step goal — routes to SwarmOrchestrator for parallel agent execution.</summary>
-        private async Task HandleMultiTaskAsync(BrainRequest request, ClassifiedIntent intent, CancellationToken ct)
-        {
-            string taskId = $"swarm-{Interlocked.Increment(ref _taskIdCounter)}";
-
-            var runningTask = new RunningTask
-            {
-                Id = taskId,
-                Description = intent.Summary,
-                UserRequest = request.Text,
-                Status = "Decomposing goal...",
-                StartedAt = DateTime.UtcNow
-            };
-
-            _runningTasks[taskId] = runningTask;
-            OnStatusChanged?.Invoke($"Swarm: {intent.Summary}");
-            OnMessage?.Invoke($"Working on it — breaking this into parallel tasks...", false);
-
-            // Hide window for screen tasks
-            OnHideWindow?.Invoke();
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    string workDir = System.IO.Path.Combine(
-                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop),
-                        "FluxWork");
-                    System.IO.Directory.CreateDirectory(workDir);
-
-                    runningTask.Status = "Executing with swarm agents...";
-                    var result = await _swarm.ExecuteGoalAsync(request.Text, workDir, ct);
-
-                    runningTask.Status = result.Success ? "Completed" : "Partially completed";
-                    runningTask.Result = $"{result.CompletedTasks}/{result.TotalTasks} tasks done in {result.Duration.TotalSeconds:F0}s";
-
-                    // Build summary message
-                    var sb = new StringBuilder();
-                    if (result.Success)
-                        sb.AppendLine($"Done! Completed {result.CompletedTasks} tasks in {result.Duration.TotalSeconds:F0}s.");
-                    else
-                        sb.AppendLine($"Completed {result.CompletedTasks}/{result.TotalTasks} tasks ({result.FailedTasks} failed).");
-
-                    if (result.FailedTaskDetails.Count > 0)
-                    {
-                        sb.AppendLine("Failed:");
-                        foreach (var fail in result.FailedTaskDetails.Take(3))
-                            sb.AppendLine($"  - {fail.Error}");
-                    }
-
-                    OnMessage?.Invoke(sb.ToString().Trim(), false);
-                }
-                catch (Exception ex)
-                {
-                    runningTask.Status = $"Failed: {ex.Message}";
-                    OnMessage?.Invoke($"Swarm task failed: {ex.Message}", false);
-                }
-                finally
-                {
-                    runningTask.CompletedAt = DateTime.UtcNow;
-                    OnShowWindow?.Invoke();
-
-                    _ = Task.Delay(TimeSpan.FromMinutes(5)).ContinueWith(t =>
-                    {
-                        _runningTasks.TryRemove(taskId, out var removed);
-                    });
-
-                    if (_runningTasks.Values.All(t => t.CompletedAt.HasValue))
-                        OnStatusChanged?.Invoke("Ready");
-                }
-            }, ct);
-        }
-
-        /// <summary>Handle self-coding request — uses SelfCodingOrchestrator to modify own source code.</summary>
-        private async Task HandleSelfCodingAsync(BrainRequest request, ClassifiedIntent intent, CancellationToken ct)
-        {
-            OnStatusChanged?.Invoke("Self-Coding...");
-            OnMessage?.Invoke("Starting self-coding system. I'll plan, review, implement, and verify.", false);
-
-            try
-            {
-                // Use _llm for both Pro and Flash roles (ModelRouter handles routing)
-                string repoRoot = System.IO.Path.GetDirectoryName(
-                    System.Reflection.Assembly.GetExecutingAssembly().Location) ?? ".";
-
-                // Walk up to find the .csproj
-                var dir = new System.IO.DirectoryInfo(repoRoot);
-                while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir.FullName, "FluxCore.csproj")))
-                    dir = dir.Parent;
-                if (dir != null) repoRoot = dir.FullName;
-
-                var orchestrator = new SelfCoding.SelfCodingOrchestrator(
-                    proModel: _llm,
-                    flashModel: _llm,
-                    repoRoot: repoRoot,
-                    userApproval: async (msg) =>
-                    {
-                        if (OnConfirmationNeeded != null)
-                            return await OnConfirmationNeeded(msg);
-                        return true; // Auto-approve if no callback
-                    },
-                    logToUI: (msg) => OnMessage?.Invoke(msg, false)
-                );
-
-                var result = await orchestrator.ExecuteAsync(request.Text, ct);
-
-                if (result.IsSuccess)
-                    OnMessage?.Invoke($"Self-coding complete! Branch: {result.Branch}. Changes merged.", false);
-                else
-                    OnMessage?.Invoke($"Self-coding stopped: {result.Error}", false);
-            }
-            catch (Exception ex)
-            {
-                OnMessage?.Invoke($"Self-coding error: {ex.Message}", false);
-            }
-            finally
-            {
-                OnStatusChanged?.Invoke("Ready");
-            }
-        }
+        // NOTE: HandleTaskQueryAsync / HandleMultiTaskAsync / HandleSelfCodingAsync were
+        // removed — none of them had a single caller. Task queries are answered by
+        // HandleChatAsync via [active_tasks] context; the Swarm is still reachable
+        // through ExecuteAutonomousResearchAsync (InnerVoice). SelfCoding\ was deleted
+        // with its only (dead) caller; preserved in .cleanup-backup\.
 
         // ===================================================================
         // HELPERS
@@ -1024,7 +873,9 @@ Your response:";
 
     public enum RequestPriority { Low, Normal, High, Critical }
 
-    public enum IntentType { Chat, PcTask, TaskQuery, MultiTask, SelfCoding, InjectCtx }
+    // Trimmed: TaskQuery/MultiTask/SelfCoding/InjectCtx had no live code paths —
+    // routing is done by Gemini tool calls (execute_pc_task / inject_task_context), not this enum.
+    public enum IntentType { Chat, PcTask }
 
     /// <summary>Semantic control signals sent to JarvisCore mid-task via ControlChannel.</summary>
     public abstract record ControlSignal

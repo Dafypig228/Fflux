@@ -30,6 +30,10 @@ namespace FluxCore
         // Validation
         public string ValidationDepth { get; set; } = "Normal"; // Fast, Normal, Thorough
 
+        // Gemini API key — settings.json or GEMINI_API_KEY env var.
+        // NEVER hardcode this in source again (the old const leaked a real key).
+        public string GeminiApiKey { get; set; } = "";
+
         // Model configuration
         public bool EnableLocalModel { get; set; } = false;
         public string LocalModelUrl { get; set; } = "http://localhost:8080";

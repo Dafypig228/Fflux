@@ -69,8 +69,6 @@ namespace FluxCore
 
         // Permission System
         private TaskCompletionSource<bool>? _permissionResult;
-        private string _pendingAction = "";
-        private string _pendingTarget = "";
 
         private StringBuilder _voiceLog = new StringBuilder();
         public ObservableCollection<ChatMessage> Messages { get; set; } = new ObservableCollection<ChatMessage>();
@@ -80,7 +78,19 @@ namespace FluxCore
 
 
         private const string SessionFile = "session_history.json";
-        private const string API_KEY = "AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs"; // TODO: Move to config
+
+        /// <summary>
+        /// Gemini API key resolution: settings.json (GeminiApiKey) → GEMINI_API_KEY env var.
+        /// The key used to be a hardcoded const here — a leaked secret baked into every
+        /// copy of the source. Keep keys OUT of source files.
+        /// </summary>
+        private string ResolveGeminiApiKey()
+        {
+            if (!string.IsNullOrWhiteSpace(_settings?.GeminiApiKey))
+                return _settings.GeminiApiKey.Trim();
+            string? env = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+            return string.IsNullOrWhiteSpace(env) ? "" : env.Trim();
+        }
 
         // WINAPI
         private const int HOTKEY_ID = 9000;
@@ -198,7 +208,16 @@ namespace FluxCore
                 // 1. Инициализация Мозгов
                 _cortex = new SensoryCortex();
                 _cortex.StartFocusTracking();
-                _gemini = new GeminiService(API_KEY);
+
+                string geminiKey = ResolveGeminiApiKey();
+                if (string.IsNullOrEmpty(geminiKey))
+                {
+                    System.Windows.MessageBox.Show(
+                        "No Gemini API key found.\n\nSet \"GeminiApiKey\" in %APPDATA%\\Davos\\settings.json " +
+                        "or the GEMINI_API_KEY environment variable, then restart.",
+                        "Davos — missing API key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                _gemini = new GeminiService(geminiKey);
 
                 // Start local ONNX embedder (downloads all-MiniLM-L6-v2 on first run, ~90 MB)
                 // Degrades gracefully to Gemini text-embedding-004 API until ready
@@ -321,19 +340,21 @@ namespace FluxCore
                 _jarvis.OnAction += (action) => Dispatcher.InvokeAsync(() => UpdateHudAction(action));
                 _jarvis.OnValidation += (success, reason) => Dispatcher.InvokeAsync(() => UpdateHudValidation(success, reason));
 
-                // --- CHAT RESPONSE WIRING ---
-                // This shows the AI's actual response in the chat (not just thoughts/actions)
+                // --- TASK COMPLETION WIRING ---
+                // FluxBrain delivers the final task result to chat via OnMessage —
+                // adding it here too showed every result TWICE. Only reset the HUD.
                 _jarvis.OnResponse += (response) => Dispatcher.InvokeAsync(() =>
                 {
-                    AddMessage(response, false);  // false = AI message
                     NeuroHudPanel.Visibility = Visibility.Collapsed;  // Hide HUD after response
                     StatusText.Visibility = Visibility.Visible;
                     StatusText.Text = "Ready";
-                    ScrollToBottom();
                 });
 
                 // --- SMART MODE: Screen Access Callback ---
                 _jarvis.SetScreenAccessCallback(RequestScreenAccessAsync);
+
+                // Apply validation depth from settings (was never wired — the setting was dead)
+                _jarvis.SetValidationDepth(_settings.ValidationDepth);
 
                 // ============================================
                 // FLUXBRAIN: Central Intelligence Router
@@ -366,16 +387,16 @@ namespace FluxCore
                     StatusText.Text = status;
                 });
 
-                // Hide/Show Flux window during PC tasks so screenshots capture actual desktop
+                // Show Flux window after PC tasks finish
                 // BeginInvoke = non-blocking (prevents deadlock from background thread)
-                _brain.OnHideWindow += () => Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    this.WindowState = System.Windows.WindowState.Minimized;
-                }));
                 _brain.OnShowWindow += () => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     this.WindowState = System.Windows.WindowState.Normal;
                     this.Activate();
+                    // OnShowWindow fires after EVERY task end (incl. REJECT/cancel, which
+                    // never fire OnResponse) — reset the HUD here so it can't get stuck
+                    NeuroHudPanel.Visibility = Visibility.Collapsed;
+                    StatusText.Visibility = Visibility.Visible;
                 }));
 
                 // CommitmentStore: SQLite-backed deferred action scheduler
@@ -393,7 +414,7 @@ namespace FluxCore
                 // TTS: Gemini Live API audio output (opt-in via settings)
                 if (_settings.TtsEnabled)
                 {
-                    _tts = new GeminiTtsService(API_KEY, _settings.TtsVoice);
+                    _tts = new GeminiTtsService(ResolveGeminiApiKey(), _settings.TtsVoice);
                     _tts.OnError += (err) => Dispatcher.InvokeAsync(() => LogMessage($"[TTS Error] {err}"));
                     _ = _tts.ConnectAsync();
 

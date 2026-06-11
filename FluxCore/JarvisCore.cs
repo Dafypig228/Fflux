@@ -68,7 +68,10 @@ namespace FluxCore
             _confirmAction = callback;
         }
 
-        // Validation depth: Fast (verify on failure), Normal (verify screen commands), Thorough (verify all)
+        // Validation depth — visual verification of SUCCESSFUL screen commands:
+        //   Fast     = none (trust command results)
+        //   Normal   = verify CLICK/TYPE (the commands that fail silently most often)
+        //   Thorough = verify every screen command
         private string _validationDepth = "Normal";
         public void SetValidationDepth(string depth) { _validationDepth = depth; }
 
@@ -113,6 +116,15 @@ namespace FluxCore
             "OPEN_APP", "LAUNCHING", "OPENING", "WINDOW",
             "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO",
             "HIDE_SELF", "MINIMIZE_SELF"
+        };
+
+        // Commands that may legitimately repeat with identical args
+        // (scrolling a long list, polling a bot log, waiting between checks).
+        // These are exempt from loop detection — banning [[SCROLL:down]] after
+        // two uses made any list navigation impossible.
+        private static readonly HashSet<string> RepeatTolerantCommands = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "SCROLL", "WAIT", "READ_LOG", "CHECK_BACKGROUND", "LOG"
         };
 
         /// <summary>
@@ -241,6 +253,15 @@ THOUGHT: [Your reasoning — what you SEE on screen and what to do]
 ACTION: [[COMMAND:arg]]
 ACTION: [[COMMAND:arg]]  (multiple commands allowed per step)
 CONFIDENCE: [0.0-1.0]
+
+FINISHING THE TASK (exact protocol):
+  Done (after verifying the result):
+    ACTION: [[RESPOND:short report of the result, or the answer the user asked for]]
+    TASK_COMPLETE
+  Impossible / gave up:
+    ACTION: [[RESPOND:what you tried and why it failed]]
+    TASK_FAILED
+  TASK_COMPLETE and TASK_FAILED are flags, not commands — write them on their own line, never inside [[...]].
 </format>
 
 <tools>
@@ -258,6 +279,9 @@ CONFIDENCE: [0.0-1.0]
                                  KnowledgeGraph — KnowledgeGraphService (GetGraphContext, GetTopTopics)
                                  Memory      — MemoryService (SearchRelevant)
                                  Gemini      — GeminiService (GenerateText, ChatAsync)
+                                 Chrome      — ChromeBridgeService:
+                                               Chrome.GetRecentPages()  // recently viewed Chrome pages (title + URL),
+                                                                        // captured live by the Davos browser extension
                                Script MUST end with: return ""result string"";
                                Write TOP-LEVEL statements only (NO class/method definitions):
                                  CORRECT: var chats = await Telegram.GetAvailableChatsAsync(); return chats.Count.ToString();
@@ -279,18 +303,36 @@ CONFIDENCE: [0.0-1.0]
   [[KEYS:combo]]             - Keyboard shortcut: ENTER, TAB, CTRL+C, CTRL+L, WIN+D, ALT+F4, ESCAPE
   [[SCROLL:up/down]]         - Scroll the active window
   [[OPEN_APP:name]]          - Open or focus an application
+  [[RESPOND:text]]           - Your final answer/report to the user (pair with TASK_COMPLETE or TASK_FAILED)
   [[REJECT:reason]]          - Exit when task is genuinely impossible with available tools
 
 TOOL SELECTION (by approach priority):
   Query Telegram data → [[RUN_CSHARP: var dialogs = await Telegram.GetAvailableChatsAsync(); return ...; ]]
   HTTP API call       → [[RUN_CSHARP: var r = await Http.GetStringAsync(""https://api.example.com""); return r; ]]
   Change a setting    → [[RUN_CSHARP: Settings.SomeProperty = value; return ""done""; ]]
+  Chrome pages        → [[RUN_CSHARP: return Chrome.GetRecentPages(); ]]
   Run a trading bot   → [[PYTHON:code]] to write bot.py, then [[START_BACKGROUND:python bot.py,bot.log]]
   Check bot status    → [[READ_LOG:bot.log]] or [[CHECK_BACKGROUND:pid]]
   Write/read files    → [[RUN_SHELL:Set-Content / Get-Content ...]]
   Navigate to URL     → [[OPEN_APP:chrome]] + [[KEYS:CTRL+L]] + [[TYPE:url]] + [[KEYS:ENTER]]
   UI interaction      → [[CLICK:x,y]] (last resort only)
 </tools>
+
+<grounding priority=""critical"">
+USE ONLY APIs THAT ACTUALLY EXIST. Inventing an API wastes steps and breaks the task.
+  - The services listed in <tools> are the ONLY Davos-specific APIs. There are no others.
+  - Chrome has NO COM interface. 'New-Object -ComObject Chrome.Application' DOES NOT EXIST. Never try it.
+  - Shell.Application.Windows() enumerates File Explorer windows ONLY — NEVER browser tabs.
+  - UI Automation cannot reliably enumerate Chrome tabs from another process without accessibility flags.
+  - What's open in Chrome → in this order:
+      1. [[RUN_CSHARP:return Chrome.GetRecentPages();]]  (pages captured by the Davos extension)
+      2. ACTIVE WINDOW title + VISIBLE UI ELEMENTS already in your context
+      3. Screen route (proven to work): focus Chrome, [[KEYS:CTRL+SHIFT+A]] — opens Chrome's
+         tab-search overlay listing ALL open tabs; read them from the next screenshot, then ESCAPE.
+  - If a COM object / API fails with 'invalid class' / 'not found' / 'does not contain a definition',
+    the API probably DOES NOT EXIST. Do NOT retry spelling variations of an invented API —
+    switch immediately to a documented capability or report the limitation via [[RESPOND:...]] TASK_FAILED.
+</grounding>
 
 <rules priority=""critical"">
 ALL TOOLS AVAILABLE AT ALL TIMES:
@@ -422,6 +464,7 @@ import pygame
             var detailedLog = new StringBuilder();
             int noCommandCount = 0;
             string lastDataOutput = ""; // Last meaningful output from a data-returning command (RUN_CSHARP, RUN_SHELL, etc.)
+            string lastRespondText = ""; // The model's own [[RESPOND:...]] answer — preferred over template text
             var usedCommandTypes = new HashSet<string>(); // Track which command types fired (for task_trace)
 
             // LOOP DETECTION tracking
@@ -485,42 +528,16 @@ import pygame
                 }
             }
 
-            // PRE-TASK STRATEGY CALL — one thinking pass before the execution loop.
-            // Uses a higher temperature (0.5) to reason openly about the best approach.
-            // Output is injected as <strategy> into the first step's context.
-            string strategyBlock = "";
-            try
-            {
-                string strategyPrompt =
-                    $"Task: {userRequest}\n\n" +
-                    "You are Davos. Pick the SMARTEST approach. Available native services (use via RUN_CSHARP):\n" +
-                    "  - Globals.Telegram  → MTProto client: GetAvailableChatsAsync() → List<TgChatInfo>(Id,Name,Type)\n" +
-                    "                        SendMessageAsync(chatId, text) or SendMessageAsync(text) → owner only\n" +
-                    "                        FIELD NAME: .Name (NOT .Title — .Title doesn't exist)\n" +
-                    "                        Use this for ANY Telegram task — never open the app.\n" +
-                    "  - Globals.DataLake  → SQLite event log: read/write observations\n" +
-                    "  - Globals.Http      → HttpClient for any web API (no browser)\n" +
-                    "  - Globals.Settings  → read/write Davos config\n" +
-                    "  - Globals.KnowledgeGraph → entity/relationship queries\n\n" +
-                    "Decision order:\n" +
-                    "  1. RUN_CSHARP with Globals.X  — if any native service can answer this (fastest, no UI)\n" +
-                    "  2. PYTHON / RUN_SHELL         — external scripts, web scraping, algorithms\n" +
-                    "  3. START_BACKGROUND           — long-running bots/scripts\n" +
-                    "  4. Screen (CLICK/TYPE)        — LAST RESORT only if nothing above works\n\n" +
-                    "Describe your approach in 2-3 sentences. Name the exact service method or library you will use.";
-
-                string strategyResponse = await _llm.GenerateText(strategyPrompt, temperature: 0.5f);
-                if (!string.IsNullOrWhiteSpace(strategyResponse) && !strategyResponse.StartsWith("ERROR"))
-                {
-                    strategyBlock = strategyResponse.Trim();
-                    _logToUI($"[💡] Strategy: {strategyBlock}");
-                    DebugLog($"[STRATEGY] {strategyBlock}");
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[Strategy] Failed: {ex.Message}");
-            }
+            // STRATEGY PRIMER — injected into the first step's context instead of a
+            // separate pre-task LLM call (which added a full serial round-trip per task).
+            // The model states its approach in THOUGHT and acts in the same response.
+            const string strategyBlock =
+                "Before your first action, pick the SMARTEST approach. Decision order:\n" +
+                "  1. RUN_CSHARP with native services (Telegram, DataLake, Http, Settings, KnowledgeGraph, Chrome) — fastest, no UI\n" +
+                "  2. PYTHON / RUN_SHELL — external scripts, web scraping, algorithms, file operations\n" +
+                "  3. START_BACKGROUND — long-running bots/scripts\n" +
+                "  4. Screen (CLICK/TYPE) — LAST RESORT only if nothing above works\n" +
+                "State your chosen approach briefly in THOUGHT, then act immediately in the SAME response.";
 
             for (int iteration = 0; iteration < MAX_STEPS; iteration++)
             {
@@ -612,8 +629,8 @@ import pygame
                 _logger.Log("Building Context...");
                 string dynamicContext = BuildDynamicContext(userRequest, failedAttempts, successfulActions, activeWindow, iteration, clickableElements, memories, ragBlock);
 
-                // Prepend strategy block to first step only — primes the loop with intelligent approach
-                if (iteration == 0 && !string.IsNullOrEmpty(strategyBlock))
+                // Prepend strategy primer to first step only — primes the loop with intelligent approach
+                if (iteration == 0)
                     dynamicContext = $"<strategy>\n{strategyBlock}\n</strategy>\n\n" + dynamicContext;
 
                 _logger.Log("Context Built.");
@@ -726,6 +743,7 @@ import pygame
                     string rejectReason = rejectMatch.Groups[1].Value.Trim();
                     System.Diagnostics.Debug.WriteLine($"[JarvisCore] REJECT: {rejectReason}");
                     _logToUI($"[JarvisCore] Rejected task: {rejectReason}");
+                    _automation.UnlockTarget(); // early exit — don't leave a stale window lock
                     return $"REJECTED: {rejectReason}";
                 }
 
@@ -758,16 +776,18 @@ import pygame
                     detailedLog.AppendLine($"[LOG]: {logCmd.Arg}");
                 }
 
-                // Check for TASK_COMPLETE flag — only in ACTION section, not THOUGHT
-                bool isTaskComplete = commandText.ToUpper().Contains("TASK_COMPLETE") || commandText.ToUpper().Contains("TASK_FAILED");
+                // Check for TASK_COMPLETE / TASK_FAILED flags — only in ACTION section, not THOUGHT.
+                // These are SEPARATE outcomes: the old code OR-ed them together, so a task the
+                // model itself declared FAILED was reported to the user as "Task Completed".
+                bool isTaskComplete = commandText.ToUpper().Contains("TASK_COMPLETE");
+                bool isTaskFailed   = commandText.ToUpper().Contains("TASK_FAILED");
 
-                // If just TASK_COMPLETE with no actions
-                if (isTaskComplete && actionCommands.Count == 0)
+                // Completion flag with no remaining actions — finalize through the single
+                // exit path (the old early return skipped unlock, trace, reflexion and HUD reset)
+                if ((isTaskComplete || isTaskFailed) && actionCommands.Count == 0)
                 {
-                    string earlyResult = !string.IsNullOrWhiteSpace(lastDataOutput)
-                        ? $"Task Completed. {lastDataOutput}"
-                        : $"Task Completed. {successfulActions.Count} actions performed successfully.";
-                    return earlyResult;
+                    return FinalizeTask(userRequest, !isTaskFailed, successfulActions, failedAttempts,
+                        lastDataOutput, lastRespondText, conversationHistory, usedCommandTypes, iteration + 1);
                 }
 
                 // 5. UNIFIED COMMAND EXECUTION — process ALL commands per step
@@ -828,7 +848,7 @@ import pygame
                         // ═══ LOOP DETECTION ═══
                         string actionKey = $"{cmd.Type}:{cmd.Arg}".ToLower();
                         int repeatCount = actionHistory.Count(a => a == actionKey);
-                        if (repeatCount >= 2)
+                        if (repeatCount >= 2 && !RepeatTolerantCommands.Contains(cmd.Type))
                         {
                             string loopMsg = $"⚠ LOOP DETECTED: You've tried '{cmd.Type}:{cmd.Arg}' {repeatCount + 1} times. " +
                                 "STOP repeating this. Use a COMPLETELY DIFFERENT approach or coordinates.";
@@ -889,6 +909,7 @@ import pygame
                                     _                    => "Task interrupted."
                                 };
                                 // Return the message — FluxBrain (the manager) will deliver it to the user
+                                _automation.UnlockTarget(); // early exit — don't leave a stale window lock
                                 return cancelMsg;
                             }
                             // No signal = app shutdown — re-throw so the outer handler disposes cleanly
@@ -925,6 +946,11 @@ import pygame
                                     : outcome.Message;
                                 OnCommandOutput?.Invoke(lastDataOutput);
                             }
+
+                            // RESPOND is the model's own answer to the user — keep it verbatim
+                            // so the final chat message is the model's words, not template text
+                            if (cmdTypeUp == "RESPOND" && !string.IsNullOrWhiteSpace(outcome.Message))
+                                lastRespondText = outcome.Message;
 
                             // WINDOW CHANGE WARNING: Click succeeded but opened wrong window
                             if (outcome.Message.Contains("Window changed"))
@@ -963,6 +989,7 @@ import pygame
                             {
                                 System.Diagnostics.Debug.WriteLine("[JarvisCore] Safety stop on Davos UI — terminating task.");
                                 _logToUI("[JarvisCore] Safety stop: tried to interact with Davos's own window.");
+                                _automation.UnlockTarget(); // early exit — don't leave a stale window lock
                                 return outcome.Message;
                             }
 
@@ -970,14 +997,25 @@ import pygame
                             failedAttempts.Add(failureMsg);
                             executedCmds.Add($"FAIL {currentAction} -> {outcome.Message}");
 
-                            // REAL-TIME LEARNING: Store failure lesson IMMEDIATELY
-                            // so the AI learns within this task, not just after
-                            string trigger = cmd.Arg.ToLower().Split(' ')[0]; // e.g., "asqar", "chrome"
-                            string lesson = $"CLICK:{cmd.Arg} failed: {outcome.Message}. Try coordinates [[CLICK:x,y]] instead.";
-                            if (cmd.Type == "OPEN_APP")
-                                lesson = $"OPEN_APP:{cmd.Arg} failed. Use [[RUN_SHELL:Start-Process '{cmd.Arg}']] instead.";
-
-                            _ = _memory.LearnStructuredAsync(trigger, lesson, fromSuccess: false);
+                            // REAL-TIME LEARNING — only for UI commands where a reusable lesson exists.
+                            // Script failures (RUN_SHELL/PYTHON/RUN_CSHARP) are task-specific: their error
+                            // text is already fed back into the conversation below. Storing them as lessons
+                            // poisoned long-term memory with "CLICK instead" advice for shell commands.
+                            string failedType = cmd.Type.ToUpper();
+                            if (failedType is "CLICK" or "CLICKING")
+                            {
+                                _ = _memory.LearnStructuredAsync(
+                                    cmd.Arg.ToLower().Split(' ')[0],
+                                    $"CLICK:{cmd.Arg} failed: {outcome.Message}. Use coordinates [[CLICK:x,y]] from the element list instead.",
+                                    fromSuccess: false);
+                            }
+                            else if (failedType is "OPEN_APP" or "LAUNCHING" or "OPENING")
+                            {
+                                _ = _memory.LearnStructuredAsync(
+                                    cmd.Arg.ToLower().Split(' ')[0],
+                                    $"OPEN_APP:{cmd.Arg} failed. Use [[RUN_SHELL:Start-Process '{cmd.Arg}']] instead.",
+                                    fromSuccess: false);
+                            }
 
                             // INJECT lesson into conversation so AI reads it NEXT STEP
                             conversationHistory.Add(new ChatMessage
@@ -994,14 +1032,19 @@ import pygame
                             }
                         }
 
-                        // VALIDATION (depth-dependent)
-                        bool shouldVerify = _validationDepth switch
+                        // VALIDATION (depth-dependent) — verify SUCCESSFUL screen commands to catch
+                        // silent failures (click landed nowhere, type went to wrong field).
+                        // Validating already-failed commands is pointless: we know they failed.
+                        // (The old logic validated FAILURES and applied the verdict only when
+                        // outcome.Success was true — a contradiction, so it never did anything.)
+                        string cmdTypeUpper = cmd.Type.ToUpper();
+                        bool shouldVerify = outcome.Success && RequiresScreenAccess(cmd.Type) && _validationDepth switch
                         {
-                            "Fast" => !outcome.Success,       // Only validate FAILURES (fast, default)
-                            "Thorough" => true,               // Validate everything
-                            _ => !outcome.Success             // Default = Fast
+                            "Fast"     => false,  // trust command-level results, no vision calls
+                            "Thorough" => true,   // verify every screen command
+                            _          => cmdTypeUpper is "CLICK" or "CLICKING" or "TYPE" or "TYPING" // Normal: the uncertain ones
                         };
-                        if (shouldVerify && RequiresScreenAccess(cmd.Type))
+                        if (shouldVerify)
                         {
                             try
                             {
@@ -1011,11 +1054,19 @@ import pygame
                                 {
                                     var validation = await _validator.ValidateVisualAsync(currentAction, screenshot, afterScreenshot);
                                     OnValidation?.Invoke(validation.Success, validation.Message);
-                                    if (!validation.Success && outcome.Success)
+                                    if (!validation.Success)
                                     {
                                         outcome = new ExecutionOutcome(false, $"Visual validation failed: {validation.Message}");
                                         failedAttempts.Add($"VISUAL_FAIL: {currentAction} -> {validation.Message}");
                                         executedCmds[executedCmds.Count - 1] = $"VISUAL_FAIL {currentAction} -> {validation.Message}";
+                                        // Roll back the success record — this action did NOT actually work
+                                        int lastOk = successfulActions.FindLastIndex(s => s == $"ok {currentAction}");
+                                        if (lastOk >= 0) successfulActions.RemoveAt(lastOk);
+                                    }
+                                    else
+                                    {
+                                        // Use the fresh capture as the "before" image for the next command in this step
+                                        screenshot = afterScreenshot;
                                     }
                                 }
                             }
@@ -1078,44 +1129,24 @@ import pygame
                             (stepNote.Length > 0 ? $" → {stepNote}" : ""));
                     }
 
-                    // AUTO-COMPLETE: Only if RESPOND is the SOLE action (pure answer, no tools alongside)
-                    bool hadRespond = actionCommands.Any(c => c.Type == "RESPOND" &&
-                        !c.Arg.ToUpper().Contains("TASK_COMPLETE") &&
-                        !c.Arg.ToUpper().Contains("TASK_FAILED") &&
-                        c.Arg.Length > 5);
-                    bool respondOnly = hadRespond && actionCommands.All(c => c.Type == "RESPOND" || c.Type == "LOG");
-                    if (respondOnly && !isTaskComplete)
+                    // AUTO-COMPLETE: RESPOND is a final answer by definition. A step consisting
+                    // only of RESPOND (+LOG) means the model is answering, not acting — complete.
+                    // (The old gate required Arg.Length > 5 and no TASK_COMPLETE inside the arg,
+                    // so short answers like "Done" silently kept the loop running.)
+                    bool respondOnly = actionCommands.Any(c => c.Type == "RESPOND") &&
+                                       actionCommands.All(c => c.Type == "RESPOND" || c.Type == "LOG");
+                    if (respondOnly && !isTaskComplete && !isTaskFailed)
                     {
                         isTaskComplete = true;
                         _logger.Log("Auto-completing: AI sent RESPOND-only step (pure answer)");
                     }
 
-                    // After TASK_COMPLETE with action, we're done
-                    if (isTaskComplete)
+                    // After TASK_COMPLETE / TASK_FAILED with actions, we're done
+                    if (isTaskComplete || isTaskFailed)
                     {
-                        log.AppendLine($"[✓] Task completed after {iteration + 1} steps");
-
-                        // Write final method summary so chat can answer "did you use the API?"
-                        DataLake?.Write("task_trace",
-                            $"COMPLETED [{string.Join(",", usedCommandTypes)}]: {userRequest.Substring(0, Math.Min(80, userRequest.Length))}");
-
-                        // CLEANUP: Unlock target window
-                        _automation.UnlockTarget();
-
-                        // REINFORCE recalled memories — task succeeded
-                        _memory.ReinforceLessons(taskSucceeded: true);
-
-                        // REFLEXION: Learn from this session (multi-lesson extraction)
-                        _logToUI("[🧠] Reflexing on task...");
-                        await PerformReflexionAsync(userRequest, conversationHistory, true);
-
-                        // Generate natural response for chat
-                        string naturalResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, true, lastDataOutput);
-                        OnResponse?.Invoke(naturalResponse);
-
-                        log.AppendLine("\n\n=== FULL DEBUG LOG ===");
-                        log.Append(detailedLog.ToString());
-                        return naturalResponse;
+                        log.AppendLine($"[{(isTaskFailed ? "✗" : "✓")}] Task {(isTaskFailed ? "failed" : "completed")} after {iteration + 1} steps");
+                        return FinalizeTask(userRequest, !isTaskFailed, successfulActions, failedAttempts,
+                            lastDataOutput, lastRespondText, conversationHistory, usedCommandTypes, iteration + 1);
                     }
 
                     // ═══ PROGRESS STALL DETECTION ═══
@@ -1219,9 +1250,6 @@ import pygame
             log.AppendLine("\n\n=== DETAILED LOG FOR DEBUGGING ===");
             log.Append(detailedLog.ToString());
 
-            // CLEANUP: Unlock target window
-            _automation.UnlockTarget();
-
             // FAILURE ANALYSIS: Use ReflectionAgent to learn from failures
             if (failedAttempts.Count > 0)
             {
@@ -1240,17 +1268,43 @@ import pygame
                 catch { } // Never crash on reflection
             }
 
-            // REINFORCE recalled memories based on outcome
-            _memory.ReinforceLessons(taskSucceeded: false);
+            return FinalizeTask(userRequest, success: false, successfulActions, failedAttempts,
+                lastDataOutput, lastRespondText, conversationHistory, usedCommandTypes, MAX_STEPS);
+        }
 
-            // REFLEXION: Learn from incomplete task too
-            await PerformReflexionAsync(userRequest, conversationHistory, false);
+        /// <summary>
+        /// Single exit path for every task outcome (success AND failure).
+        /// The old code had four separate exit paths and three of them skipped
+        /// cleanup: the automation agent stayed locked onto a stale window, the
+        /// HUD never reset, no task_trace was written and memory was never
+        /// reinforced. Every terminal return now funnels through here.
+        /// </summary>
+        private string FinalizeTask(
+            string userRequest, bool success,
+            List<string> successfulActions, List<string> failedAttempts,
+            string lastDataOutput, string lastRespondText,
+            List<ChatMessage> conversationHistory,
+            HashSet<string> usedCommandTypes, int steps)
+        {
+            _automation.UnlockTarget();
 
-            // Generate natural response even for incomplete tasks
-            string incompleteResponse = GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, false, lastDataOutput);
-            OnResponse?.Invoke(incompleteResponse);
+            // Final method summary so chat mode can answer "did you use the API?"
+            DataLake?.Write("task_trace",
+                $"{(success ? "COMPLETED" : "FAILED")} after {steps} steps " +
+                $"[{string.Join(",", usedCommandTypes)}]: {userRequest.Substring(0, Math.Min(80, userRequest.Length))}");
 
-            return incompleteResponse;
+            _memory.ReinforceLessons(taskSucceeded: success);
+
+            // Fire-and-forget on a history snapshot — never block the user's result
+            // on an extra reflexion LLM call
+            _ = PerformReflexionAsync(userRequest, new List<ChatMessage>(conversationHistory), success);
+
+            // Prefer the model's own [[RESPOND:...]] words; fall back to template text
+            string response = !string.IsNullOrWhiteSpace(lastRespondText)
+                ? lastRespondText
+                : GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, success, lastDataOutput);
+            OnResponse?.Invoke(response);
+            return response;
         }
     }
 }

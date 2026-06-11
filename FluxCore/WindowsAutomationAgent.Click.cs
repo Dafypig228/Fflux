@@ -32,9 +32,11 @@ namespace FluxCore
                         lastResult = await ClickElementInternalAsync(nameOrId, usePhysicalClick: true);
                         break;
                     case 2:
-                        // Third try: scroll to reveal, then click
-                        await ScrollAsync("down");
-                        await Task.Delay(50);
+                        // Third try: physical click after a longer settle delay.
+                        // (The old strategy scrolled the page here — a hidden UI mutation
+                        // that invalidated every coordinate the AI had. If scrolling is
+                        // needed, the AI issues [[SCROLL:...]] explicitly.)
+                        await Task.Delay(300);
                         lastResult = await ClickElementInternalAsync(nameOrId, usePhysicalClick: true);
                         break;
                 }
@@ -67,14 +69,15 @@ namespace FluxCore
                 var coordMatch = System.Text.RegularExpressions.Regex.Match(nameOrId, @"(\d+)[, ]+(\d+)");
                 if (coordMatch.Success)
                 {
-                    int x = int.Parse(coordMatch.Groups[1].Value);
-                    int y = int.Parse(coordMatch.Groups[2].Value);
+                    // AI coordinates arrive in SCREENSHOT SPACE (50% of logical resolution)
+                    int sx = int.Parse(coordMatch.Groups[1].Value);
+                    int sy = int.Parse(coordMatch.Groups[2].Value);
 
                     // Scale from 50% screenshot space to full screen (logical) coordinates
                     // Pipeline: Screenshot=50% logical → ×2 → full logical → SetCursorPos (logical)
                     // NO DPI adjustment needed — entire pipeline is in logical pixel space
-                    x *= 2;
-                    y *= 2;
+                    int x = sx * 2;
+                    int y = sy * 2;
 
                     // BOUNDS CHECK: Refuse clicks outside the active window
                     IntPtr activeWin = targetWindow != IntPtr.Zero ? targetWindow : GetForegroundWindow();
@@ -119,7 +122,10 @@ namespace FluxCore
                     string titleAfter = GetActiveWindowTitle();
                     string titleChange = titleAfter != titleBefore ? $" | ⚠ Window changed: '{titleBefore}' → '{titleAfter}'" : "";
 
-                    return new AutomationResult(true, $"Clicked at {x},{y}{elementAtPoint}{titleChange}");
+                    // Report SCREENSHOT-SPACE coords back to the AI — it thinks in that space.
+                    // Reporting doubled (logical) coords made the AI re-use them, get doubled
+                    // again, and click far off-target.
+                    return new AutomationResult(true, $"Clicked at {sx},{sy}{elementAtPoint}{titleChange}");
                 }
 
                 // Wait for element to appear
@@ -146,7 +152,8 @@ namespace FluxCore
                                 parentName = $" in:{parent.Current.Name}";
                         }
                         catch { }
-                        return $"'{e.Name}' ({e.Type}{parentName}) at {e.X + e.Width / 2},{e.Y + e.Height / 2}";
+                        // Coordinates reported in SCREENSHOT SPACE (÷2) — the space the AI clicks in
+                        return $"'{e.Name}' ({e.Type}{parentName}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}";
                     }));
                     return new AutomationResult(false,
                         $"AMBIGUOUS: {allMatches.Count} elements match '{nameOrId}': [{matchList}]. Use [[CLICK:x,y]] with exact coordinates.");
@@ -168,7 +175,7 @@ namespace FluxCore
                 {
                     var clickables = FindClickableElements();
                     string available = clickables.Count > 0
-                        ? string.Join(", ", clickables.Take(8).Select(e => $"'{e.Name}'({e.Type}) at {e.X + e.Width / 2},{e.Y + e.Height / 2}"))
+                        ? string.Join(", ", clickables.Take(8).Select(e => $"'{e.Name}'({e.Type}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}"))
                         : "none";
                     return new AutomationResult(false, $"Element not found: '{nameOrId}'. Available: {available}");
                 }
@@ -191,7 +198,7 @@ namespace FluxCore
                     await Task.Delay(50);
                     string nameTitleAfter = GetActiveWindowTitle();
                     string nameTitleChange = nameTitleAfter != nameTitleBefore ? $" | Window changed: '{nameTitleBefore}' → '{nameTitleAfter}'" : "";
-                    return new AutomationResult(true, $"Clicked: '{target.Name}' ({target.Type} at {target.X + target.Width / 2},{target.Y + target.Height / 2}){nameTitleChange}");
+                    return new AutomationResult(true, $"Clicked: '{target.Name}' ({target.Type} at {(target.X + target.Width / 2) / 2},{(target.Y + target.Height / 2) / 2}){nameTitleChange}");
                 }
 
                 // Physical mouse click
@@ -207,7 +214,7 @@ namespace FluxCore
                 await Task.Delay(50);
                 string namePhysTitle = GetActiveWindowTitle();
                 string namePhysTitleChange = namePhysTitle != nameTitleBefore ? $" | Window changed: '{nameTitleBefore}' → '{namePhysTitle}'" : "";
-                return new AutomationResult(true, $"Clicked: '{target.Name}' ({target.Type} at {centerX},{centerY}){namePhysTitleChange}");
+                return new AutomationResult(true, $"Clicked: '{target.Name}' ({target.Type} at {centerX / 2},{centerY / 2}){namePhysTitleChange}");
             }
             catch (Exception ex)
             {

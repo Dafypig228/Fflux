@@ -17,9 +17,19 @@ namespace FluxCore
         private async Task<ExecutionOutcome> ExecuteWithRetryAsync(string cmdType, string cmdArg)
         {
             string lastError = "";
+            string upperType = cmdType.ToUpper();
 
-            // CLICK already retries 3x internally via ClickWithRetryAsync — don't double-retry
-            int maxRetries = (cmdType.ToUpper() == "CLICK") ? 1 : MAX_RETRIES;
+            // Retry policy:
+            //   CLICK    — retries internally via ClickWithRetryAsync, don't double-retry
+            //   Scripts  — RUN_SHELL/PYTHON/RUN_CSHARP etc. are deterministic: re-running an
+            //              identical failing script wastes up to 60s per attempt and can
+            //              repeat side effects (file moves, sends). Execute ONCE; the AI
+            //              sees the error and writes a corrected script next step.
+            //   Other UI — transient focus/timing issues are real, allow retries.
+            bool isUiCommand = ScreenCommands.Contains(upperType);
+            int maxRetries = (upperType == "CLICK" || upperType == "CLICKING") ? 1
+                           : isUiCommand ? MAX_RETRIES
+                           : 1;
 
             for (int retry = 0; retry < maxRetries; retry++)
             {
@@ -38,13 +48,17 @@ namespace FluxCore
                     if (result.Message.Contains("SAFETY STOP"))
                     {
                         if (result.Message.Contains("Davos's own window") &&
-                            cmdType.ToUpper() != "SCROLL")
+                            upperType != "SCROLL")
                         {
                             // Hard stop for CLICK/TYPE/KEYS — would corrupt Davos UI. Do not retry.
                             return new ExecutionOutcome(false, "SAFETY STOP: Cannot interact with Davos UI.");
                         }
-                        // For SCROLL or transient wrong-focus — refocus expected app and retry
-                        await _executor.OpenApp(GetExpectedApp(cmdType, cmdArg));
+                        // For SCROLL or transient wrong-focus — refocus the expected app ONLY
+                        // when we can infer one from the command. (The old default of "chrome"
+                        // made Davos randomly open Chrome in the middle of unrelated tasks.)
+                        string expectedApp = GetExpectedApp(cmdType, cmdArg);
+                        if (!string.IsNullOrEmpty(expectedApp))
+                            await _executor.OpenApp(expectedApp);
                         await Task.Delay(200);
                         continue;
                     }
@@ -92,36 +106,13 @@ namespace FluxCore
                 catch { /* Best effort check */ }
             }
 
-            // Apply retry strategies
+            // Retry pacing: brief pause lets transient focus/timing issues settle.
+            // NOTE: no hidden UI mutations here — the old code scrolled the page on
+            // CLICK retries, which silently invalidated every coordinate the AI knew.
+            // If scrolling is needed, the AI decides that explicitly via [[SCROLL:...]].
             if (retryCount > 0)
             {
-                // Strategy for retries:
-                // 1. Click: Try coordinates if text selector failed
-                // 2. Type: Try clipboard paste instead of keyboard
-                // 3. Open: Try alternative app names
-
-                if (cmdType == "CLICK" && retryCount == 1)
-                {
-                    // Try scrolling first, then retry
-                    await _automation.ScrollAsync("down");
-                    await Task.Delay(150);
-                }
-                else if (cmdType == "CLICK" && retryCount == 2)
-                {
-                    // REMOVED dangerous Tab+Enter fallback which opens Explorer!
-                    // If click fails twice, just report failure so AI can try coordinates.
-                    return new ExecutionResult(false, "Click failed (element not found)");
-                }
-                else if (cmdType == "TYPE" && retryCount > 0)
-                {
-                    // Focus the active window by clicking its center (not hardcoded coords)
-                    IntPtr fg = GetForegroundWindow();
-                    if (fg != IntPtr.Zero)
-                    {
-                        SetForegroundWindow(fg);
-                        await Task.Delay(50);
-                    }
-                }
+                await Task.Delay(100 * retryCount);
             }
 
             // Execute the actual command
@@ -194,6 +185,16 @@ namespace FluxCore
                     // REJECT is normally caught at the loop level before command dispatch.
                     return new ExecutionResult(false, $"REJECTED: {cmdArg}");
 
+                case "RESPOND":
+                    // Final answer to the user. This command was advertised to the model
+                    // and parsed, but had NO executor case — every RESPOND failed with
+                    // "Unknown command" and the answer text was silently lost.
+                    string answer = cmdArg
+                        .Replace("TASK_COMPLETE", "", StringComparison.OrdinalIgnoreCase)
+                        .Replace("TASK_FAILED", "", StringComparison.OrdinalIgnoreCase)
+                        .Trim();
+                    return new ExecutionResult(true, answer);
+
                 case "LOG":
                     // LOG is informative - keep it in Neuro-Hud only
                     // _logToUI($"[📝] {cmdArg}");
@@ -246,13 +247,16 @@ namespace FluxCore
 
         private string GetExpectedApp(string cmdType, string cmdArg)
         {
-            // Infer expected app from command context
-            if (cmdArg.ToLower().Contains("instagram")) return "chrome";
-            if (cmdArg.ToLower().Contains("telegram")) return "telegram";
-            if (cmdArg.ToLower().Contains("notepad")) return "notepad";
-            if (cmdArg.ToLower().Contains("cmd") || cmdArg.ToLower().Contains("command")) return "cmd";
-            if (cmdArg.ToLower().Contains("powershell")) return "powershell";
-            return "chrome"; // default
+            // Infer expected app from command context.
+            // Returns "" when nothing can be inferred — callers must NOT refocus then.
+            // (The old default of "chrome" opened Chrome during unrelated tasks.)
+            string argLower = cmdArg.ToLower();
+            if (argLower.Contains("instagram")) return "chrome";
+            if (argLower.Contains("telegram")) return "telegram";
+            if (argLower.Contains("notepad")) return "notepad";
+            if (argLower.Contains("cmd") || argLower.Contains("command")) return "cmd";
+            if (argLower.Contains("powershell")) return "powershell";
+            return "";
         }
 
         // P/Invoke for window finding and focus

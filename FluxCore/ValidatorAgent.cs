@@ -1,201 +1,73 @@
 using System;
-using System.IO;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using FluxCore.LLM;
 
 namespace FluxCore
 {
     /// <summary>
-    /// Validator/Critic Agent: Verifies if actions were actually performed
-    /// and decides if retry is needed.
+    /// Validator/Critic Agent: visually verifies that screen actions actually happened.
     /// </summary>
     public class ValidatorAgent
     {
         private readonly ILLMService _llm;
-        private const int MAX_RETRIES = 2;
 
         public ValidatorAgent(ILLMService llm)
         {
             _llm = llm;
         }
 
+        // NOTE: the legacy text-based ValidateAsync (WRITE_FILE/RUN_NODE/DOWNLOAD_FILE
+        // checks + a Contains("failed") heuristic that flagged successes as failures)
+        // was removed with its only caller, the dead MainWindow execution pipeline.
+
         /// <summary>
-        /// Validates if a command execution was successful.
-        /// Returns suggested action: "success", "retry", or specific correction.
+        /// Visually verifies an action using the AFTER screenshot.
+        /// The ILLMService wrapper supports one image per call, so the prompt is honest
+        /// about receiving a single post-action screenshot (the old prompt promised two
+        /// images and confused the model). The beforeBase64 parameter is kept for
+        /// signature compatibility (ScreenAgent also calls this).
+        /// Inconclusive responses count as SUCCESS — a false FAILURE poisons the task
+        /// loop far more than a missed verification.
         /// </summary>
-        public async Task<ValidationResult> ValidateAsync(string command, string commandType, string executionResult)
-        {
-            // Quick checks for obvious success/failure
-            if (executionResult.Contains("Error:") || executionResult.Contains("failed"))
-            {
-                return new ValidationResult(false, "Command failed", true);
-            }
-
-            // Type-specific validation
-            switch (commandType.ToUpper())
-            {
-                case "WRITE_FILE":
-                    return await ValidateFileWriteAsync(command, executionResult);
-                    
-                case "RUN_PYTHON":
-                case "RUN_SHELL":
-                case "RUN_NODE":
-                    return ValidateCodeExecution(executionResult);
-                    
-                case "DOWNLOAD_FILE":
-                    return await ValidateDownloadAsync(command, executionResult);
-                    
-                case "OPEN_APP":
-                    // App opening is hard to verify, trust the result
-                    return new ValidationResult(true, "App opened", false);
-                    
-                default:
-                    // For other commands, check for success indicators
-                    if (executionResult.Contains("Success") || 
-                        executionResult.Contains("Typed") ||
-                        executionResult.Contains("Clicked") ||
-                        executionResult.Contains("Sent keys") ||
-                        executionResult.Contains("Copied"))
-                    {
-                        return new ValidationResult(true, "Command executed", false);
-                    }
-                    return new ValidationResult(true, "Assumed success", false);
-            }
-        }
-
-        private async Task<ValidationResult> ValidateFileWriteAsync(string command, string result)
-        {
-            try
-            {
-                // Extract path from command (format: WRITE_FILE:path|content)
-                string path = "";
-                if (command.Contains("|"))
-                {
-                    path = command.Split('|')[0].Trim();
-                }
-                
-                if (string.IsNullOrEmpty(path))
-                {
-                    return new ValidationResult(false, "Could not extract file path", true);
-                }
-                
-                path = Environment.ExpandEnvironmentVariables(path);
-                
-                // Check if file actually exists now
-                if (File.Exists(path))
-                {
-                    var info = new FileInfo(path);
-                    if (info.Length > 0)
-                    {
-                        return new ValidationResult(true, $"File verified: {info.Length} bytes", false);
-                    }
-                    return new ValidationResult(false, "File exists but is empty", true);
-                }
-                
-                return new ValidationResult(false, "File was not created", true);
-            }
-            catch (Exception ex)
-            {
-                return new ValidationResult(false, $"Validation error: {ex.Message}", false);
-            }
-        }
-
-        private ValidationResult ValidateCodeExecution(string result)
-        {
-            // Check for error indicators in output
-            if (result.Contains("Traceback") || 
-                result.Contains("Error:") ||
-                result.Contains("SyntaxError") ||
-                result.Contains("not found"))
-            {
-                return new ValidationResult(false, "Code execution had errors", true);
-            }
-            
-            if (result.Contains("output:") || result.Contains("(no output)"))
-            {
-                return new ValidationResult(true, "Code executed successfully", false);
-            }
-            
-            return new ValidationResult(true, "Assumed success", false);
-        }
-
-        private async Task<ValidationResult> ValidateDownloadAsync(string command, string result)
-        {
-            try
-            {
-                // Extract save path from command (format: DOWNLOAD_FILE:url|path)
-                var parts = command.Split('|');
-                if (parts.Length < 2)
-                {
-                    return new ValidationResult(false, "Invalid download command format", false);
-                }
-                
-                string path = Environment.ExpandEnvironmentVariables(parts[1].Trim());
-                
-                if (File.Exists(path))
-                {
-                    var info = new FileInfo(path);
-                    return new ValidationResult(true, $"Downloaded: {info.Length} bytes", false);
-                }
-                
-                return new ValidationResult(false, "Downloaded file not found", true);
-            }
-            catch
-            {
-                return new ValidationResult(false, "Could not verify download", false);
-            }
-        }
         public async Task<ValidationResult> ValidateVisualAsync(string intent, string beforeBase64, string afterBase64)
         {
             try
             {
-                if (string.IsNullOrEmpty(beforeBase64) || string.IsNullOrEmpty(afterBase64))
+                if (string.IsNullOrEmpty(afterBase64))
                 {
                     return new ValidationResult(true, "Skipped visual check (missing screenshot)", false);
                 }
 
-                // Prepare Prompt for Gemini Vision
-                var history = new List<ChatMessage> 
-                { 
-                    new ChatMessage 
-                    { 
-                        IsUser = true, 
-                        Text = $@"
-I will provide you with TWO screenshots: 'BEFORE' and 'AFTER'.
-The user tried to perform this action: '{intent}'.
-Your job is to act as a QA VALIDATOR.
+                string prompt =
+                    $"You are a QA validator. An automation agent just performed this action: '{intent}'.\n" +
+                    "The attached screenshot shows the screen AFTER the action.\n" +
+                    "Decide whether the screen state is CONSISTENT with the action having succeeded.\n" +
+                    "Examples: 'Open Notepad' → a Notepad window is visible; 'Type Hello' → that text appears in a field.\n" +
+                    "Only answer FAILURE if the screen clearly contradicts the action. If it is consistent or you cannot tell, answer SUCCESS.\n\n" +
+                    "Reply in EXACTLY this format:\n" +
+                    "VERDICT: SUCCESS or FAILURE\n" +
+                    "REASON: one short sentence";
 
-1. Compare the BEFORE and AFTER images.
-2. Did the screen change in a way that suggests the action succeeded?
-   - Example: If 'Open Notepad', does the AFTER image show a Notepad window?
-   - Example: If 'Type Hello', does the text appear?
-   - Example: If nothing changed, it FAILED.
+                string response = await _llm.ChatWithHistory(
+                    new List<ChatMessage>(), prompt, "BASE64:" + afterBase64, "", "", null, 0.1f);
 
-Output strictly in this format:
-VERDICT: [SUCCESS or FAILURE]
-REASON: [Brief explanation of what changed or didn't change]
-" 
-                    } 
-                };
+                // Tolerant parsing — accepts "VERDICT: FAILURE", "**VERDICT:** FAILURE", "VERDICT:FAILURE", …
+                // The old exact-string check ("VERDICT: SUCCESS") returned false FAILURE
+                // whenever the model added markdown or dropped the space.
+                var verdictMatch = System.Text.RegularExpressions.Regex.Match(
+                    response, @"VERDICT\W{0,5}(SUCCESS|FAILURE)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-                // We send "Before" as text placeholder (Gemini tool handles multiple images poorly in one message via this API wrapper usually,
-                // but let's try sending After as the main vision payload or both if supported.
-                // Assuming ChatWithHistory supports one vision attachment per turn. 
-                // Strategy: Send 'After' image. 'Before' context is less critical if 'After' shows the desired state.
-                // BETTER STRATEGY: Visual Question Answering often works best with just the RESULT image for 'Is X present?'.
-                // Let's rely on the AFTER image to verify the goal.
-                
-                string prompt = $"The user wanted to: '{intent}'. Look at this screen (AFTER the action). Did they likely succeed? VERDICT: SUCCESS/FAILURE.";
-                
-                // TODO: For true diff, we need multi-image support. 
-                // For now, let's just show the AFTER image and ask "Does this look like '{intent}' was done?"
-                
-                string response = await _llm.ChatWithHistory(history, prompt, "BASE64:" + afterBase64, "", "", null, 0.1f);
-                
-                bool isSuccess = response.ToUpper().Contains("VERDICT: SUCCESS");
-                string reason = response.Contains("REASON:") 
-                    ? response.Substring(response.IndexOf("REASON:") + 7).Trim() 
-                    : response;
+                if (!verdictMatch.Success)
+                    return new ValidationResult(true, "Visual check inconclusive — assuming success", false);
+
+                bool isSuccess = verdictMatch.Groups[1].Value.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase);
+
+                var reasonMatch = System.Text.RegularExpressions.Regex.Match(
+                    response, @"REASON\W{0,5}(.+)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string reason = reasonMatch.Success ? reasonMatch.Groups[1].Value.Trim() : response.Trim();
 
                 return new ValidationResult(isSuccess, reason, !isSuccess);
             }

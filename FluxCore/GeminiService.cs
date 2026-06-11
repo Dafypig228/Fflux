@@ -162,6 +162,17 @@ namespace FluxCore
                 new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_NONE" }
             };
 
+            // thinkingBudget = 0 disables Gemini 2.5 Flash's "thinking" phase.
+            // Without this, EVERY call (each of up to 30 task steps, validations,
+            // reflexion) spends seconds generating hidden reasoning tokens — the
+            // single largest latency source in the whole agent loop.
+            var generationConfig = new
+            {
+                temperature = (double)temperature,
+                maxOutputTokens = 32768,
+                thinkingConfig = new { thinkingBudget = 0 }
+            };
+
             object payload;
             if (!string.IsNullOrWhiteSpace(systemInstruction))
             {
@@ -172,7 +183,7 @@ namespace FluxCore
                         parts = new[] { new { text = systemInstruction } }
                     },
                     contents = contentsObj,
-                    generationConfig = new { temperature = (double)temperature, maxOutputTokens = 32768 },
+                    generationConfig,
                     safetySettings
                 };
             }
@@ -181,7 +192,7 @@ namespace FluxCore
                 payload = new
                 {
                     contents = contentsObj,
-                    generationConfig = new { temperature = (double)temperature, maxOutputTokens = 32768 },
+                    generationConfig,
                     safetySettings
                 };
             }
@@ -528,7 +539,13 @@ namespace FluxCore
                 contents,
                 tools            = new[] { new { functionDeclarations = functionDecls.ToArray() } },
                 tool_config      = new { functionCallingConfig = new { mode = "AUTO" } },
-                generationConfig = new { temperature = (double)temperature, maxOutputTokens = 8192 },
+                // thinkingBudget = 0 — see SendPayload; chat replies become near-instant
+                generationConfig = new
+                {
+                    temperature = (double)temperature,
+                    maxOutputTokens = 8192,
+                    thinkingConfig = new { thinkingBudget = 0 }
+                },
                 safetySettings
             };
 

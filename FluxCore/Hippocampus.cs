@@ -113,7 +113,10 @@ namespace FluxCore
 
             var contextLower = context.ToLower();
             var relevant = _memories
-                .Where(m => contextLower.Contains(m.Trigger.ToLower()))
+                // Confidence floor: lessons that kept failing (or were stored from
+                // one-off failures and never confirmed) must stop being injected as
+                // "MANDATORY LESSONS" — they actively mislead the agent.
+                .Where(m => m.Confidence >= 0.2f && contextLower.Contains(m.Trigger.ToLower()))
                 .OrderByDescending(m => m.Confidence)
                 .ThenByDescending(m => m.UseCount)
                 .Take(5)

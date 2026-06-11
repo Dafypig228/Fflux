@@ -33,5 +33,8 @@ namespace FluxCore
 
         /// <summary>Gemini LLM — call the model from within a script.</summary>
         public GeminiService? Gemini { get; init; }
+
+        /// <summary>Chrome extension bridge — recently viewed pages (GetRecentPages), page text/images.</summary>
+        public ChromeBridgeService? Chrome { get; init; }
     }
 }

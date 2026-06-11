@@ -98,7 +98,9 @@ LESSON: <the rule>
                 if (successes.Count == 1)
                 {
                     // Single action - describe it naturally
-                    string action = successes[0].Replace("✓ ", "");
+                    // (entries are stored with an "ok " prefix — the old code stripped
+                    // a "✓ " prefix that no longer exists, breaking the description)
+                    string action = successes[0].StartsWith("ok ") ? successes[0][3..] : successes[0];
                     sb.Append(DescribeActionNaturally(action));
                 }
                 else if (successes.Count > 1)
@@ -162,10 +164,9 @@ LESSON: <the rule>
                 "KEYS" => $"Pressed {arg}.",
                 "OPEN_APP" => $"Opened {arg}.",
                 "SCROLL" => $"Scrolled {arg}.",
-                "MOVE_FILE" => $"Moved the file.",
-                "LIST_FILES" => $"Listed the files.",
-                "POWERSHELL" or "PS" => $"Ran the command.",
-                "PYTHON" => $"Ran Python code.",
+                "RUN_SHELL" or "POWERSHELL" or "PS" => $"Ran the command.",
+                "PYTHON" or "RUN_PYTHON" => $"Ran Python code.",
+                "RUN_CSHARP" or "CSHARP" or "CS" => $"Ran a C# script.",
                 _ => $"Did {cmd.ToLower()}."
             };
         }

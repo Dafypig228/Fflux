@@ -191,6 +191,33 @@ namespace FluxCore
             return sb.ToString();
         }
 
+        /// <summary>
+        /// Returns the recently captured pages (up to 10) — the grounded answer to
+        /// "what's open / what was I browsing in Chrome". Pages are captured by the
+        /// Davos extension as the user browses; this is recent browsing history from
+        /// the live session, not a tab enumeration. Exposed to RUN_CSHARP via
+        /// ScriptGlobals.Chrome — without this, the model invented COM APIs
+        /// (Chrome.Application) that don't exist.
+        /// </summary>
+        public string GetRecentPages(int maxAgeMinutes = 240)
+        {
+            List<PageData> pages;
+            lock (_lock)
+                pages = _pages.Values.OrderByDescending(p => p.When).ToList();
+
+            if (pages.Count == 0)
+                return "No pages captured — the Davos Chrome extension hasn't reported anything yet.";
+
+            var sb = new StringBuilder();
+            foreach (var p in pages)
+            {
+                var age = DateTime.Now - p.When;
+                if (age.TotalMinutes > maxAgeMinutes) continue;
+                sb.AppendLine($"[{age.TotalMinutes:F0}m ago] {p.Title} — {p.Url}");
+            }
+            return sb.Length > 0 ? sb.ToString().TrimEnd() : "No recently captured pages.";
+        }
+
         /// <summary>Returns Base64 images from the current page for vision LLM input.</summary>
         public string[] GetPageImages()
         {

@@ -53,10 +53,13 @@ namespace FluxCore
             if (failures.Count >= 3)
             {
                 sb.AppendLine("\n💡 ALTERNATIVE STRATEGIES (pick one you haven't tried):");
+                sb.AppendLine("  0. If scripts keep failing with 'not found'/'invalid class'/'does not contain a definition' —");
+                sb.AppendLine("     the API you invented DOES NOT EXIST. Use ONLY services documented in <grounding>/<tools>.");
                 sb.AppendLine("  1. Use [[RUN_SHELL:...]] instead of UI clicks");
                 sb.AppendLine("  2. Use [[KEYS:TAB]] + [[KEYS:ENTER]] for keyboard navigation");
                 sb.AppendLine("  3. [[SCROLL:down]] to reveal hidden elements");
                 sb.AppendLine("  4. [[OPEN_APP:...]] to refocus the correct window");
+                sb.AppendLine("  5. If nothing works: [[RESPOND:honest report of what you tried]] then TASK_FAILED");
             }
             if (!string.IsNullOrEmpty(clickableElements))
             {
@@ -150,12 +153,24 @@ namespace FluxCore
                                     cmdType == "START_BACKGROUND";
                     if (isScript)
                     {
+                        // BOUNDARY: a script arg can never legitimately contain another
+                        // [[COMMAND: opener. Without this bound, the "last ]] before
+                        // newline" fallback could swallow every FOLLOWING command into the
+                        // script's argument — and those commands were ALSO parsed in their
+                        // own pass, so the script ran corrupted AND the commands ran twice.
+                        int boundary = text.Length;
+                        foreach (var t in commandTypes)
+                        {
+                            int pos = text.IndexOf($"[[{t}:", argStart);
+                            if (pos >= 0 && pos < boundary) boundary = pos;
+                        }
+
                         int bestEnd = -1;
                         int searchPos = argStart;
-                        while (searchPos < text.Length)
+                        while (searchPos < boundary)
                         {
                             int candidate = text.IndexOf("]]", searchPos);
-                            if (candidate < 0) break;
+                            if (candidate < 0 || candidate >= boundary) break;
                             int after = candidate + 2;
 
                             if (after >= text.Length)
@@ -177,14 +192,23 @@ namespace FluxCore
                                 break; // Definitive match
                             }
 
-                            // LOW confidence: followed by newline (could be inside code like Python 2D arrays)
-                            // Keep updating — use the LAST ]]\n as fallback
+                            // LOW confidence: followed by newline (could be inside code like
+                            // Python 2D arrays) — keep updating; use the LAST ]]\n before the boundary
                             if (text[after] == '\n' || text[after] == '\r')
                             {
                                 bestEnd = candidate;
                             }
 
                             searchPos = candidate + 1;
+                        }
+
+                        // Malformed: no closing ]] before the next command opener —
+                        // take everything up to it as the arg instead of dropping the command
+                        if (bestEnd < 0 && boundary < text.Length)
+                        {
+                            result.Add((cmdType, text.Substring(argStart, boundary - argStart).Trim(), start));
+                            searchStart = boundary;
+                            continue;
                         }
                         end = bestEnd;
                     }
@@ -230,15 +254,6 @@ namespace FluxCore
         private static void AppendPassive(StringBuilder sb, string block)
         {
             if (!string.IsNullOrEmpty(block)) sb.AppendLine($"\n{block}");
-        }
-
-        private string CleanResponse(string response)
-        {
-            return response
-                .Replace("TASK_COMPLETE", "")
-                .Replace("[[", "")
-                .Replace("]]", "")
-                .Trim();
         }
 
         // PredictScreenRequirement removed — no keyword arrays.
