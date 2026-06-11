@@ -1,0 +1,91 @@
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Automation; // Œ·ˇÁ‡ÚÂÎ¸ÌÓ ‰Ó·‡‚¸ ÒÒ˚ÎÍÛ Ì‡ UIAutomationClient Ë UIAutomationTypes
+
+namespace FluxCore
+{
+    public class ContextService
+    {
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT lpPoint);
+        [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+
+        // --- —ÀŒ… 1: »Ïˇ ÓÍÌ‡ ---
+        public string GetLayer1_Metadata(out bool hasChanged)
+        {
+            hasChanged = false;
+            try
+            {
+                IntPtr hwnd = GetForegroundWindow();
+                StringBuilder sb = new StringBuilder(256);
+                GetWindowText(hwnd, sb, 256);
+                return $"ACTIVE WINDOW: [{sb}] (HWND: {hwnd})";
+            }
+            catch { return "UNKNOWN WINDOW"; }
+        }
+
+        // --- —ÀŒ… 3: œŒÀÕŒ≈ ƒ≈–≈¬Œ »Õ“≈–‘≈…—¿ (DEEP SCAN) ---
+        public string GetLayer3_UIHierarchy()
+        {
+            try
+            {
+                GetCursorPos(out POINT p);
+                var element = AutomationElement.FromPoint(new System.Windows.Point(p.X, p.Y));
+
+                if (element == null) return "NO UI ELEMENT";
+
+                StringBuilder dump = new StringBuilder();
+                dump.AppendLine($"--- FOCUSED ELEMENT ---");
+                dump.AppendLine($"Type: {element.Current.LocalizedControlType}");
+                dump.AppendLine($"Name: \"{element.Current.Name}\"");
+                dump.AppendLine($"ID: {element.Current.AutomationId}");
+                dump.AppendLine($"Value: {GetTextPattern(element)}");
+
+                // — ¿Õ»–”≈Ã –Œƒ»“≈À≈… (œ”“‹ Õ¿¬≈–’)
+                dump.AppendLine($"\n--- HIERARCHY PATH ---");
+                var walker = TreeWalker.ControlViewWalker;
+                var parent = walker.GetParent(element);
+                int depth = 0;
+
+                while (parent != null && depth < 5) // Œ„‡ÌË˜ËÏ „ÎÛ·ËÌÛ, ˜ÚÓ·˚ ÌÂ Á‡‚ËÒÎÓ
+                {
+                    dump.Insert(0, $"{parent.Current.LocalizedControlType} [\"{parent.Current.Name}\"] > \n");
+                    parent = walker.GetParent(parent);
+                    depth++;
+                }
+
+                // — ¿Õ»–”≈Ã —Œ—≈ƒ≈… (◊“Œ –ﬂƒŒÃ)
+                dump.AppendLine($"\n--- SURROUNDING ELEMENTS (SIBLINGS) ---");
+                var parentNode = walker.GetParent(element);
+                if (parentNode != null)
+                {
+                    var child = walker.GetFirstChild(parentNode);
+                    int count = 0;
+                    while (child != null && count < 20) // Ã‡ÍÒËÏÛÏ 20 ÒÓÒÂ‰ÂÈ
+                    {
+                        string marker = (child == element) ? " <--- [CURSOR]" : "";
+                        dump.AppendLine($" - {child.Current.LocalizedControlType}: \"{child.Current.Name}\"{marker}");
+                        child = walker.GetNextSibling(child);
+                        count++;
+                    }
+                }
+
+                return dump.ToString();
+            }
+            catch (Exception ex)
+            {
+                return $"UI SCAN ERROR: {ex.Message}";
+            }
+        }
+
+        private string GetTextPattern(AutomationElement el)
+        {
+            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object p)) return ((ValuePattern)p).Current.Value;
+            if (el.TryGetCurrentPattern(TextPattern.Pattern, out object t)) return "Text Content Available";
+            return "No Value";
+        }
+    }
+}
