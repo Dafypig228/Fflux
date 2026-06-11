@@ -80,7 +80,7 @@ namespace FluxCore
 
 
         private const string SessionFile = "session_history.json";
-        private const string API_KEY = "AIzaSyDcSz3EBGyUT1NRkMwDzNfEFQk_8KfWFQs"; // TODO: Move to config
+        private const string API_KEY = "AIzaSyC28nJ3qjPGxigwJrkKaIQEWvAyqUl88bE"; // TODO: Move to config
 
         // WINAPI
         private const int HOTKEY_ID = 9000;
@@ -321,19 +321,21 @@ namespace FluxCore
                 _jarvis.OnAction += (action) => Dispatcher.InvokeAsync(() => UpdateHudAction(action));
                 _jarvis.OnValidation += (success, reason) => Dispatcher.InvokeAsync(() => UpdateHudValidation(success, reason));
 
-                // --- CHAT RESPONSE WIRING ---
-                // This shows the AI's actual response in the chat (not just thoughts/actions)
+                // --- TASK COMPLETION WIRING ---
+                // FluxBrain delivers the final task result to chat via OnMessage —
+                // adding it here too showed every result TWICE. Only reset the HUD.
                 _jarvis.OnResponse += (response) => Dispatcher.InvokeAsync(() =>
                 {
-                    AddMessage(response, false);  // false = AI message
                     NeuroHudPanel.Visibility = Visibility.Collapsed;  // Hide HUD after response
                     StatusText.Visibility = Visibility.Visible;
                     StatusText.Text = "Ready";
-                    ScrollToBottom();
                 });
 
                 // --- SMART MODE: Screen Access Callback ---
                 _jarvis.SetScreenAccessCallback(RequestScreenAccessAsync);
+
+                // Apply validation depth from settings (was never wired — the setting was dead)
+                _jarvis.SetValidationDepth(_settings.ValidationDepth);
 
                 // ============================================
                 // FLUXBRAIN: Central Intelligence Router
