@@ -1,7 +1,7 @@
 ﻿<Window x:Class="FluxCore.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Fluxoria"
+        Title="Davos"
         Width="340"
         SizeToContent="Height" 
         MinHeight="180" MaxHeight="600"
@@ -95,16 +95,21 @@
         </Style>
     </Window.Resources>
 
-    <!-- Main container with blur effect -->
-    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#25FFFFFF" CornerRadius="10" Padding="10" MouseLeftButtonDown="OnDrag">
-        <Border.Background>
-            <SolidColorBrush x:Name="TintBrush" Color="#F0101015"/>
-        </Border.Background>
-        <Border.Effect>
-            <BlurEffect x:Name="BackgroundBlur" Radius="0"/>
-        </Border.Effect>
-
+    <!-- Main container - BLUR FIX: Separate background and content layers -->
+    <Border x:Name="MainBorder" BorderThickness="1" BorderBrush="#25FFFFFF" CornerRadius="10" MouseLeftButtonDown="OnDrag">
         <Grid>
+            <!-- BACKGROUND LAYER - This gets blurred (behind content) -->
+            <Border x:Name="BlurredBackground" CornerRadius="10">
+                <Border.Background>
+                    <SolidColorBrush x:Name="TintBrush" Color="#F0101015"/>
+                </Border.Background>
+                <Border.Effect>
+                    <BlurEffect x:Name="BackgroundBlur" Radius="0"/>
+                </Border.Effect>
+            </Border>
+
+            <!-- CONTENT LAYER - Stays sharp (on top) -->
+            <Grid Margin="10">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -127,7 +132,7 @@
                             <DropShadowEffect Color="#00FFD1" BlurRadius="4" ShadowDepth="0"/>
                         </Ellipse.Effect>
                     </Ellipse>
-                    <TextBlock x:Name="TitleText" Text="FLUXORIA" Foreground="White" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" FontSize="11"/>
+                    <TextBlock x:Name="TitleText" Text="DAVOS" Foreground="White" FontWeight="Bold" FontFamily="Consolas" VerticalAlignment="Center" FontSize="11"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
@@ -145,12 +150,35 @@
             <Border Grid.Row="1" Margin="0,8,0,4">
                 <StackPanel>
                     <TextBlock x:Name="StatusText" Text="Ready" Foreground="#50FFFFFF" FontSize="9" FontFamily="Consolas" HorizontalAlignment="Center"/>
-                    
+
                     <!-- TAB NAVIGATION -->
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,6,0,0">
                         <Button x:Name="TabChat" Content="💬 Chat" Style="{StaticResource TabBtn}" Click="Tab_Chat_Click" Foreground="#00FFD1"/>
                         <Button x:Name="TabMemory" Content="🧠 Memory" Style="{StaticResource TabBtn}" Click="Tab_Memory_Click"/>
+                        <Button x:Name="TabTasks" Content="⚡ Tasks" Style="{StaticResource TabBtn}" Click="Tab_Tasks_Click"/>
+                        <Button x:Name="TabInnerVoice" Content="💭 Inner" Style="{StaticResource TabBtn}" Click="Tab_InnerVoice_Click"/>
                     </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- NEURO HUD PANEL - AI status display -->
+            <Border x:Name="NeuroHudPanel" Grid.Row="2" Visibility="Collapsed"
+                    Background="#15FFFFFF" CornerRadius="6" Padding="8" Margin="0,0,0,6">
+                <StackPanel>
+                    <DockPanel>
+                        <Ellipse x:Name="HudStateLight" Width="8" Height="8" Fill="#00FFD1" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="HudStateText" Text="READY" Foreground="#00FFD1" FontWeight="Bold" FontSize="10"/>
+                        <Border x:Name="HudValidationBadge" HorizontalAlignment="Right"
+                                Background="#2000FF00" CornerRadius="4" Padding="4,2" Visibility="Collapsed">
+                            <TextBlock Text="✓ VERIFIED" Foreground="#00FF00" FontSize="9"/>
+                        </Border>
+                    </DockPanel>
+                    <TextBlock x:Name="HudContentText" Text="" Foreground="#80FFFFFF" FontSize="9"
+                               TextWrapping="Wrap" Margin="14,4,0,0"/>
+                    <Border x:Name="HudActionBox" Background="#10FFFFFF" CornerRadius="4"
+                            Padding="6,4" Margin="0,4,0,0" Visibility="Collapsed">
+                        <TextBlock x:Name="HudActionText" Text="" Foreground="#FFDD00" FontSize="9"/>
+                    </Border>
                 </StackPanel>
             </Border>
 
@@ -172,12 +200,54 @@
                     <!-- Wake word -->
                     <DockPanel Margin="0,0,0,6">
                         <TextBlock Text="Name" Foreground="#80FFFFFF" FontSize="9" Width="50" VerticalAlignment="Center"/>
-                        <TextBox x:Name="NameBox" Text="Fluxoria" Style="{StaticResource GlassBox}" FontSize="11" TextChanged="NameBox_TextChanged"/>
+                        <TextBox x:Name="NameBox" Text="Davos" Style="{StaticResource GlassBox}" FontSize="11" TextChanged="NameBox_TextChanged"/>
+                    </DockPanel>
+
+                    <!-- ElevenLabs API Key -->
+                    <TextBlock Text="ElevenLabs API Key" Foreground="#80FFFFFF" FontSize="9" Margin="0,0,0,2"/>
+                    <TextBox x:Name="ElevenLabsKeyBox" Style="{StaticResource GlassBox}" FontSize="11" Margin="0,0,0,6" TextChanged="ElevenLabsKey_Changed"/>
+
+                    <!-- STT Languages -->
+                    <TextBlock Text="STT languages" Foreground="#80FFFFFF" FontSize="9" Margin="0,0,0,3"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <CheckBox x:Name="SttRuCheck" Content="RU" Style="{StaticResource NeonCheck}" Margin="0,0,8,0" Checked="SttLang_Changed" Unchecked="SttLang_Changed"/>
+                        <CheckBox x:Name="SttEnCheck" Content="EN" Style="{StaticResource NeonCheck}" Margin="0,0,8,0" Checked="SttLang_Changed" Unchecked="SttLang_Changed"/>
+                        <CheckBox x:Name="SttKkCheck" Content="KK" Style="{StaticResource NeonCheck}" Checked="SttLang_Changed" Unchecked="SttLang_Changed"/>
+                    </StackPanel>
+
+                    <!-- Telegram -->
+                    <Separator Margin="0,6,0,4" Background="#20FFFFFF"/>
+                    <TextBlock Text="TELEGRAM" Foreground="#606070" FontSize="9" FontFamily="Consolas" Margin="0,0,0,4"/>
+                    <CheckBox x:Name="TelegramCheck" Content="Enable Telegram (MTProto)" Style="{StaticResource NeonCheck}" Margin="0,0,0,4"
+                              Checked="TelegramCheck_Changed" Unchecked="TelegramCheck_Changed"/>
+                    <StackPanel x:Name="TelegramFields" Visibility="Collapsed" Margin="0,0,0,2">
+                        <TextBlock Text="API ID" Foreground="#80FFFFFF" FontSize="9" Margin="0,0,0,2"/>
+                        <TextBox x:Name="TgApiIdBox" Style="{StaticResource GlassBox}" FontSize="11" Margin="0,0,0,4"
+                                 TextChanged="TgApiId_Changed"/>
+                        <TextBlock Text="API Hash" Foreground="#80FFFFFF" FontSize="9" Margin="0,0,0,2"/>
+                        <TextBox x:Name="TgApiHashBox" Style="{StaticResource GlassBox}" FontSize="11" Margin="0,0,0,4"
+                                 TextChanged="TgApiHash_Changed"/>
+                    </StackPanel>
+                    <DockPanel Margin="0,2,0,6">
+                        <Button Content="↺ Reset Session" DockPanel.Dock="Right"
+                                Style="{StaticResource CleanBtn}" FontSize="8" Padding="6,2"
+                                Click="TgResetSession_Click"
+                                ToolTip="Delete session file and re-authenticate"
+                                Foreground="#80A0B0"/>
+                        <Button x:Name="TgChooseChatsBtn" Content="⚙ Chats" DockPanel.Dock="Right"
+                                Style="{StaticResource CleanBtn}" FontSize="8" Padding="6,2" Margin="0,0,4,0"
+                                Click="TgChooseChats_Click"
+                                ToolTip="Choose which chats and groups to monitor"
+                                Foreground="#80C0A0"
+                                IsEnabled="False"/>
+                        <TextBlock x:Name="TelegramStatus" Text="● Not configured" Foreground="#506060"
+                                   FontSize="9" FontFamily="Consolas" VerticalAlignment="Center"/>
                     </DockPanel>
 
                     <!-- Checkboxes -->
                     <CheckBox x:Name="WakeWordCheck" Content="Require wake word" IsChecked="True" Style="{StaticResource NeonCheck}" Margin="0,0,0,4" Checked="WakeWord_Changed" Unchecked="WakeWord_Changed"/>
-                    <CheckBox x:Name="AutoMinimizeCheck" Content="Auto-minimize on complete" IsChecked="True" Style="{StaticResource NeonCheck}" Margin="0,0,0,6" Checked="AutoMinimize_Changed" Unchecked="AutoMinimize_Changed"/>
+                    <CheckBox x:Name="AutoMinimizeCheck" Content="Auto-minimize on complete" IsChecked="True" Style="{StaticResource NeonCheck}" Margin="0,0,0,4" Checked="AutoMinimize_Changed" Unchecked="AutoMinimize_Changed"/>
+                    <CheckBox x:Name="TtsCheck" Content="Voice responses (Gemini TTS)" Style="{StaticResource NeonCheck}" Margin="0,0,0,6" Checked="Tts_Changed" Unchecked="Tts_Changed"/>
 
                     <!-- Useful buttons -->
                     <UniformGrid Columns="3" Margin="0,4,0,0">
@@ -202,6 +272,7 @@
                     <Style TargetType="ListViewItem">
                         <Setter Property="Focusable" Value="False"/>
                         <Setter Property="Margin" Value="0,2"/>
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ListViewItem">
@@ -214,7 +285,7 @@
 
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Border CornerRadius="8" Padding="8,6" Margin="0,0,10,0" MaxWidth="280">
+                        <Border CornerRadius="8" Padding="8,6" Margin="0,0,10,0">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="HorizontalAlignment" Value="Left"/>
@@ -258,6 +329,90 @@
                 </Grid>
             </Border>
 
+            <!-- TASKS PANEL -->
+            <Border x:Name="TasksPanel" Grid.Row="3" Visibility="Collapsed" Background="#08FFFFFF" CornerRadius="6" Margin="0,2,0,0" Padding="8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="⚡ Running Tasks" Foreground="#00FFD1" FontWeight="Bold" FontSize="10" Margin="0,0,0,6"/>
+                    <ListView x:Name="TasksList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="10">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#10FFFFFF" CornerRadius="4" Padding="6" Margin="0,1">
+                                    <StackPanel>
+                                        <DockPanel>
+                                            <TextBlock Text="{Binding Description}" Foreground="#00FFD1" FontWeight="SemiBold" FontSize="10"/>
+                                            <TextBlock Text="{Binding Status}" Foreground="#80FFFFFF" FontSize="9" HorizontalAlignment="Right"/>
+                                        </DockPanel>
+                                        <TextBlock Text="{Binding Result}" Foreground="#60FFFFFF" FontSize="9" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <!-- INNER VOICE PANEL -->
+            <Border x:Name="InnerVoicePanel" Grid.Row="3" Visibility="Collapsed"
+                    Background="#08FFFFFF" CornerRadius="6" Margin="0,2,0,0" Padding="8">
+                <DockPanel>
+                    <!-- Status row -->
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+                        <Ellipse x:Name="InnerStatusDot" Width="8" Height="8"
+                                 Fill="#40FFFFFF" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="InnerStatusText" Text="Idle" FontSize="9"
+                                   FontFamily="Consolas" Foreground="#50FFFFFF" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <!-- Drive gauges -->
+                    <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,4,0">
+                            <TextBlock Text="BORED" Foreground="#30FFFFFF" FontSize="7" FontFamily="Consolas"/>
+                            <ProgressBar x:Name="GaugeBoredom" Height="3" Minimum="0" Maximum="1"
+                                         Foreground="#FF6666" Background="#15FFFFFF" BorderThickness="0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Margin="0,0,4,0">
+                            <TextBlock Text="CURIOUS" Foreground="#30FFFFFF" FontSize="7" FontFamily="Consolas"/>
+                            <ProgressBar x:Name="GaugeCuriosity" Height="3" Minimum="0" Maximum="1"
+                                         Foreground="#FFD700" Background="#15FFFFFF" BorderThickness="0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="0,0,4,0">
+                            <TextBlock Text="FRUST" Foreground="#30FFFFFF" FontSize="7" FontFamily="Consolas"/>
+                            <ProgressBar x:Name="GaugeFrustration" Height="3" Minimum="0" Maximum="1"
+                                         Foreground="#FF9944" Background="#15FFFFFF" BorderThickness="0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="3">
+                            <TextBlock Text="ENERGY" Foreground="#30FFFFFF" FontSize="7" FontFamily="Consolas"/>
+                            <ProgressBar x:Name="GaugeEnergy" Height="3" Minimum="0" Maximum="1"
+                                         Foreground="#00FFD1" Background="#15FFFFFF" BorderThickness="0"/>
+                        </StackPanel>
+                    </Grid>
+                    <!-- Thought history (newest at top) -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ItemsControl x:Name="InnerVoiceList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="0,0,0,4" Padding="6,4"
+                                            Background="#08FFFFFF" CornerRadius="4">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Time}" Foreground="#30FFFFFF"
+                                                       FontSize="7" FontFamily="Consolas"/>
+                                            <TextBlock Text="{Binding Text}" Foreground="#AAFFFFFF"
+                                                       FontSize="10" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+
             <!-- INPUT BOX -->
             <Border Grid.Row="4" Background="#12FFFFFF" CornerRadius="10" Padding="2" Margin="0,4,0,0">
                 <Grid>
@@ -282,12 +437,32 @@
                             <TextBlock Text="LOGS" Foreground="#00FFD1" FontWeight="Bold" FontSize="10" VerticalAlignment="Center"/>
                             <Button Content="✕" Click="Btn_CloseLogs_Click" HorizontalAlignment="Right" Style="{StaticResource CleanBtn}" Foreground="#FF5555"/>
                         </DockPanel>
-                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#999999" BorderThickness="0" 
+                        <TextBox x:Name="LogTextBox" Grid.Row="1" Background="Transparent" Foreground="#999999" BorderThickness="0"
                                  TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="8" IsReadOnly="True" FontFamily="Consolas" FontSize="9"/>
                     </Grid>
                 </Border>
             </Grid>
 
+            <!-- PERMISSION OVERLAY -->
+            <Grid x:Name="PermissionOverlay" Grid.RowSpan="5" Visibility="Collapsed" Background="#F0050505">
+                <Border Background="#151520" BorderBrush="#40FFFFFF" BorderThickness="1" CornerRadius="8"
+                        Padding="16" Margin="20" VerticalAlignment="Center">
+                    <StackPanel>
+                        <TextBlock Text="⚠️ Permission Required" Foreground="#FFDD00" FontWeight="Bold" FontSize="12" Margin="0,0,0,10"/>
+                        <TextBlock x:Name="PermissionActionText" Text="" Foreground="White" FontSize="11" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="PermissionDetailsText" Text="" Foreground="#80FFFFFF" FontSize="10"
+                                   TextWrapping="Wrap" Margin="0,6,0,12"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <Button Content="✓ Allow" Click="Btn_PermissionAllow_Click"
+                                    Style="{StaticResource CleanBtn}" Background="#2000FF00" Margin="0,0,10,0" Padding="16,8"/>
+                            <Button Content="✕ Deny" Click="Btn_PermissionDeny_Click"
+                                    Style="{StaticResource CleanBtn}" Background="#20FF0000" Padding="16,8"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            </Grid>
         </Grid>
     </Border>
 </Window>

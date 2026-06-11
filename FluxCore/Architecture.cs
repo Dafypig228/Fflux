@@ -1,9 +1,11 @@
+using FluxCore.LLM;
+
 namespace FluxCore
 {
-    // Класс-обертка для связи с мозгом
+    // Legacy factory for brain instance
     public class NeuralLink
     {
-        public GeminiService Brain { get; private set; }
+        public ILLMService Brain { get; private set; }
 
         public NeuralLink(string apiKey)
         {
@@ -11,11 +13,11 @@ namespace FluxCore
         }
     }
 
-    // Класс-обертка для основного цикла
+    // пїЅпїЅпїЅпїЅпїЅ-пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
     public class OmniLoop
     {
         public SensoryCortex Cortex { get; }
-        // ЭТО РЕШАЕТ ОШИБКУ 'does not contain definition for Link'
+        // пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ 'does not contain definition for Link'
         public NeuralLink Link { get; }
 
         public OmniLoop(SensoryCortex cortex, NeuralLink link)
