@@ -135,7 +135,8 @@ namespace FluxCore
 
                 case "CLICK":
                 case "CLICKING":
-                    var clickRes = await _automation.ClickElementAsync(cmdArg);
+                    // CLICK:7 = element [7] from the current step's numbered list
+                    var clickRes = await _automation.ClickElementAsync(ResolveElementIndex(cmdArg));
                     return new ExecutionResult(clickRes.Success, clickRes.Message);
 
                 case "SCROLL":

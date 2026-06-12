@@ -10,6 +10,11 @@ namespace FluxCore
 {
     public partial class WindowsAutomationAgent
     {
+        /// <summary>Caps element names in error messages — web elements can carry whole
+        /// paragraphs as their accessible name; the model only needs name + coordinates.</summary>
+        private static string Shorten(string s, int max) =>
+            string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..(max - 1)] + "…";
+
         /// <summary>
         /// Performs a reliable click with retry and multiple strategies.
         /// </summary>
@@ -149,11 +154,13 @@ namespace FluxCore
                         {
                             var parent = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(e.Element);
                             if (parent != null && !string.IsNullOrWhiteSpace(parent.Current.Name))
-                                parentName = $" in:{parent.Current.Name}";
+                                parentName = $" in:{Shorten(parent.Current.Name, 40)}";
                         }
                         catch { }
-                        // Coordinates reported in SCREENSHOT SPACE (÷2) — the space the AI clicks in
-                        return $"'{e.Name}' ({e.Type}{parentName}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}";
+                        // Coordinates reported in SCREENSHOT SPACE (÷2) — the space the AI clicks in.
+                        // Names capped: web elements can carry entire page paragraphs as their name,
+                        // and dumping them made one AMBIGUOUS error multi-KB (CAPTCHA trace 2026-06-12).
+                        return $"'{Shorten(e.Name, 60)}' ({e.Type}{parentName}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}";
                     }));
                     return new AutomationResult(false,
                         $"AMBIGUOUS: {allMatches.Count} elements match '{nameOrId}': [{matchList}]. Use [[CLICK:x,y]] with exact coordinates.");
@@ -175,7 +182,7 @@ namespace FluxCore
                 {
                     var clickables = FindClickableElements();
                     string available = clickables.Count > 0
-                        ? string.Join(", ", clickables.Take(8).Select(e => $"'{e.Name}'({e.Type}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}"))
+                        ? string.Join(", ", clickables.Take(8).Select(e => $"'{Shorten(e.Name, 60)}'({e.Type}) at {(e.X + e.Width / 2) / 2},{(e.Y + e.Height / 2) / 2}"))
                         : "none";
                     return new AutomationResult(false, $"Element not found: '{nameOrId}'. Available: {available}");
                 }

@@ -130,7 +130,9 @@ User input (text/voice)
 
 11. **Loop detection**: identical actions are blocked at 3rd repeat EXCEPT
     `RepeatTolerantCommands` (SCROLL/WAIT/READ_LOG/CHECK_BACKGROUND/LOG) — those
-    legitimately repeat (scrolling lists, polling bot logs).
+    legitimately repeat (scrolling lists, polling bot logs). KEYS is WARN-ONLY
+    (executed, never blocked): pressing ENTER/TAB at different moments is normal;
+    hard-blocking it forced absurd workarounds (CAPTCHA trace 2026-06-12).
 
 12. **Parser**: script args in `ExtractAllCommands` are bounded at the next `[[COMMAND:`
     opener — without the bound, the "last ]]\n" fallback swallowed following commands
@@ -183,7 +185,22 @@ model dialogue (post-truncation — exactly what the model saw) to
 `%APPDATA%\Davos\traces\trace_yyyyMMdd_HHmmss.md`. When analyzing a run, grep THAT file —
 do not paste UI logs into AI sessions (2-3x duplicated, model-side context missing) and do
 not trust third-party AI summaries of logs (a Gemini summary fabricated a trace JSON on
-2026-06-12). User-cancel and safety-stop exits leave no trace file.
+2026-06-12). User-cancel and safety-stop exits leave no trace file. CAVEAT: long tasks
+compact early history mid-run, so traces show the final steps + a summary line; for full
+forensics on 10+ step tasks use the UI log (FluxDebug.txt) as well.
+
+Session 4b (2026-06-12, CAPTCHA + desktop traces): KEYS loop detection is WARN-ONLY
+(hard block forced pathological workarounds; mirrors CLICK-near-loop design) ·
+`[[CLICK:n]]` resolves element [n] from the current step's numbered list to coordinates
+(`ResolveElementIndex`; the model used indices naturally and the harness rejected them) ·
+element names in AMBIGUOUS/not-found errors capped at 60 chars (web elements carry whole
+paragraphs as names → multi-KB errors) · step budget shown each step ([Step n/30]) +
+wrap-up warning in the last 5 steps (model burned 9 steps post-futility with no honest
+TASK_FAILED because it didn't know steps were finite).
+Known open issues (judgment layer, NOT harness): declares success on assumption without
+cheap verification (desktop trace: "I will assume... CONFIDENCE: 1.0"); bulk file moves
+bury desktop shortcuts (.lnk/.url) without stating interpretation. → completion audit
+(roadmap 5b) is the planned defense.
 Dead code deleted (backups in `.cleanup-backup\`): legacy MainWindow.Permissions pipeline
 (2nd ExtractAllCommands + WRITE_FILE/RUN_NODE/DOWNLOAD_FILE), ValidatorAgent.ValidateAsync,
 FluxBrain Handle{TaskQuery,MultiTask,SelfCoding}Async + OnHideWindow + IntentType trim,

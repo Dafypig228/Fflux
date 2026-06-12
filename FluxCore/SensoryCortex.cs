@@ -318,7 +318,7 @@ namespace FluxCore
                 }
                 else
                 {
-                    sb.AppendLine($"\n⚠ Use [[CLICK:x,y]] coordinates from this list.");
+                    sb.AppendLine($"\n⚠ Click via [[CLICK:n]] (element number above) or [[CLICK:x,y]] coordinates from this list.");
                 }
                 
                 return sb.ToString();

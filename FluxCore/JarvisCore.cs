@@ -127,6 +127,25 @@ namespace FluxCore
             "SCROLL", "WAIT", "READ_LOG", "CHECK_BACKGROUND", "LOG"
         };
 
+        // Last UI element list shown to the model this step. The list is numbered
+        // ("[7] кнопка \"...\" → x,y"), so the model naturally writes [[CLICK:7]] —
+        // resolve that index to coordinates instead of failing a name search on "7"
+        // (CAPTCHA trace 2026-06-12: CLICK:39/29/4 → not-found/AMBIGUOUS, wasted steps).
+        private string _lastElementsList = "";
+
+        /// <summary>Resolves a bare element number from the current step's element list
+        /// to "x,y" coordinates. Returns the arg unchanged if it isn't a small integer
+        /// or no matching numbered entry exists.</summary>
+        private string ResolveElementIndex(string arg)
+        {
+            if (!int.TryParse(arg.Trim(), out int idx) || idx < 1 || idx > 99) return arg;
+            if (string.IsNullOrEmpty(_lastElementsList)) return arg;
+            var m = System.Text.RegularExpressions.Regex.Match(_lastElementsList,
+                $@"^\s*\[{idx}\]\s.*?→\s*(\d+),(\d+)\s*$",
+                System.Text.RegularExpressions.RegexOptions.Multiline);
+            return m.Success ? $"{m.Groups[1].Value},{m.Groups[2].Value}" : arg;
+        }
+
         /// <summary>
         /// Check if a command can run in background without screen access.
         /// </summary>
@@ -350,7 +369,7 @@ ALL TOOLS AVAILABLE AT ALL TIMES:
   - NEVER use [[OPEN_APP:powershell]] or [[OPEN_APP:cmd]]. RUN_SHELL already IS PowerShell.
 
 CLICKING:
-  - ALWAYS use [[CLICK:x,y]] coordinates from the VISIBLE UI ELEMENTS list.
+  - [[CLICK:n]] clicks element [n] from the VISIBLE UI ELEMENTS list (preferred), or use [[CLICK:x,y]].
   - NEVER use [[CLICK:name]] if multiple elements share that name.
   - Coordinates are in SCREENSHOT SPACE (half of screen resolution).
 
@@ -364,6 +383,9 @@ ANTI-LOOP (CRITICAL):
   - If a click opens the WRONG window/page, immediately go back: [[KEYS:ALT+TAB]] or [[OPEN_APP:targetApp]]
   - NEVER click the same coordinates more than twice. If it didn't work, the element is NOT there.
   - If you're stuck for 5+ steps, STOP and reconsider your ENTIRE strategy.
+  - You have a FIXED step budget (shown each step as [Step n/max]). NEVER run out silently —
+    when the budget is nearly gone, report what you achieved honestly via [[RESPOND:...]]
+    with TASK_COMPLETE or TASK_FAILED.
   - Before EACH action, check: ""Have I tried this before?"" If yes, do something DIFFERENT.
   - In messaging apps (Telegram, WhatsApp): right-click for context menus, check ... (three-dot) menus.
 </rules>
@@ -585,6 +607,7 @@ import pygame
                         // Element scan on THIS thread (UIA is COM/STA, can't run on ThreadPool)
                         try { clickableElements = _cortex?.GetClickableElements(15) ?? ""; }
                         catch { clickableElements = ""; }
+                        _lastElementsList = clickableElements; // for CLICK:<index> resolution
                         
                         // Now get the screenshot result
                         screenshot = await screenshotTask;
@@ -857,12 +880,30 @@ import pygame
                         int repeatCount = actionHistory.Count(a => a == actionKey);
                         if (repeatCount >= 2 && !RepeatTolerantCommands.Contains(cmd.Type))
                         {
-                            string loopMsg = $"⚠ LOOP DETECTED: You've tried '{cmd.Type}:{cmd.Arg}' {repeatCount + 1} times. " +
-                                "STOP repeating this. Use a COMPLETELY DIFFERENT approach or coordinates.";
-                            conversationHistory.Add(new ChatMessage { Text = loopMsg, IsUser = true });
-                            failedAttempts.Add($"LOOP: {cmd.Type}:{cmd.Arg} attempted {repeatCount + 1} times");
-                            _logToUI($"[🔄] Loop detected: {cmd.Type}:{cmd.Arg} ({repeatCount + 1}x)");
-                            continue; // Skip execution — force AI to reconsider
+                            // KEYS: warn but EXECUTE (mirrors the CLICK-near-loop design).
+                            // Pressing the same key (ENTER, TAB) at different moments of a long
+                            // task is normal; hard-blocking forced pathological workarounds
+                            // (CAPTCHA trace 2026-06-12: blocked KEYS:ENTER → the model clicked
+                            // autocomplete suggestions because it "wasn't allowed" to press Enter).
+                            if (cmd.Type.Equals("KEYS", StringComparison.OrdinalIgnoreCase))
+                            {
+                                conversationHistory.Add(new ChatMessage
+                                {
+                                    Text = $"⚠ NOTE: '{cmd.Type}:{cmd.Arg}' used {repeatCount + 1} times this task. " +
+                                           "Intentional repeats are fine; if you're stuck in a loop, change approach.",
+                                    IsUser = true
+                                });
+                                _logToUI($"[🔄] Repeat noted (executed anyway): {cmd.Type}:{cmd.Arg} ({repeatCount + 1}x)");
+                            }
+                            else
+                            {
+                                string loopMsg = $"⚠ LOOP DETECTED: You've tried '{cmd.Type}:{cmd.Arg}' {repeatCount + 1} times. " +
+                                    "STOP repeating this. Use a COMPLETELY DIFFERENT approach or coordinates.";
+                                conversationHistory.Add(new ChatMessage { Text = loopMsg, IsUser = true });
+                                failedAttempts.Add($"LOOP: {cmd.Type}:{cmd.Arg} attempted {repeatCount + 1} times");
+                                _logToUI($"[🔄] Loop detected: {cmd.Type}:{cmd.Arg} ({repeatCount + 1}x)");
+                                continue; // Skip execution — force AI to reconsider
+                            }
                         }
 
                         // CLICK LOOP: Detect clicking same area repeatedly (within 30px)
@@ -1094,7 +1135,7 @@ import pygame
 
                     // Build execution summary for conversation history
                     var summary = new StringBuilder();
-                    summary.AppendLine($"Executed {executedCmds.Count}/{actionCommands.Count} commands:");
+                    summary.AppendLine($"[Step {iteration + 1}/{MAX_STEPS}] Executed {executedCmds.Count}/{actionCommands.Count} commands:");
                     foreach (var e in executedCmds) summary.AppendLine($"  {e}");
                     if (skippedCmds.Count > 0)
                     {
@@ -1123,6 +1164,15 @@ import pygame
                     {
                         summary.AppendLine("\n⚠ CRITICAL: You have run " + totalShellSuccesses + " shell commands across steps. " +
                             "If these are similar operations, you MUST combine them into ONE batch pipeline IMMEDIATELY.");
+                    }
+                    // BUDGET WARNING — without this the model has no idea steps are finite.
+                    // CAPTCHA trace 2026-06-12: futility diagnosed ~step 21, then 9 more steps
+                    // burned into the hard ceiling with no honest TASK_FAILED report.
+                    if (iteration >= MAX_STEPS - 6)
+                    {
+                        summary.AppendLine($"\n⚠ STEP BUDGET: only {MAX_STEPS - iteration - 1} steps remain after this one. " +
+                            "If the goal cannot be finished in that budget, WRAP UP NOW: report what you achieved " +
+                            "and what remains via [[RESPOND:...]] with TASK_COMPLETE or TASK_FAILED.");
                     }
 
                     conversationHistory.Add(new ChatMessage { Text = summary.ToString(), IsUser = true });
