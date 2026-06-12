@@ -152,8 +152,20 @@ namespace FluxCore
 
             try
             {
-                // CRITICAL: Use UTF-8 encoding for Cyrillic/Unicode support
-                string utf8Prefix = "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ";
+                // CRITICAL: Use UTF-8 encoding for Cyrillic/Unicode support.
+                // The PSDefaultParameterValues line forces FILE writes (Out-File, >, >>,
+                // Set-Content, Add-Content, Export-Csv) to UTF-8 too — Windows PowerShell 5.1
+                // defaults Out-File/> to UTF-16 LE, which Python then reads as NUL-riddled
+                // garbage (' P r o c e s s '). Verified empirically via -EncodedCommand on
+                // this machine: with the preference set, both Out-File -Append and > emit
+                // EF BB BF (UTF-8 BOM). Python must read these files with encoding='utf-8-sig'
+                // (documented in the <grounding> prompt section).
+                string utf8Prefix =
+                    "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " +
+                    "$PSDefaultParameterValues['Out-File:Encoding']='utf8'; " +
+                    "$PSDefaultParameterValues['Set-Content:Encoding']='utf8'; " +
+                    "$PSDefaultParameterValues['Add-Content:Encoding']='utf8'; " +
+                    "$PSDefaultParameterValues['Export-Csv:Encoding']='utf8'; ";
                 string fullCommand = utf8Prefix + command;
 
                 byte[] commandBytes = Encoding.Unicode.GetBytes(fullCommand);
@@ -206,6 +218,9 @@ namespace FluxCore
                     StandardOutputEncoding = Encoding.UTF8,
                     StandardErrorEncoding = Encoding.UTF8
                 };
+                // Python writes cp1252 to redirected pipes by default — force UTF-8 to match
+                // the UTF-8 decoder above (harmless for powershell/cmd/node).
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
 
                 using var process = new Process { StartInfo = psi };
 
@@ -227,11 +242,31 @@ namespace FluxCore
                 string resultOutput = output.ToString().Trim();
                 string resultError = error.ToString().Trim();
 
-                if (resultOutput.Length > MAX_OUTPUT_LENGTH)
-                    resultOutput = resultOutput.Substring(0, MAX_OUTPUT_LENGTH) + "\n...[truncated]";
+                // Head+tail truncation: the conclusion of a script prints LAST — the old
+                // head-only cut destroyed exactly the part the model needed.
+                resultOutput = OutputTrim.Middle(resultOutput, 1500, MAX_OUTPUT_LENGTH - 1500);
 
-                if (process.ExitCode != 0 && !string.IsNullOrEmpty(resultError))
-                    return new ExecutionResult(false, $"Exit code {process.ExitCode}: {resultError}");
+                // Nonzero exit code is ALWAYS a failure, even with empty stderr — the old
+                // check (exit != 0 AND stderr non-empty) reported silent `exit 1` as success.
+                // Include stdout in the failure too: prints before a crash are evidence.
+                if (process.ExitCode != 0)
+                {
+                    var fail = new StringBuilder($"Exit code {process.ExitCode}");
+                    if (resultError.Length > 0)
+                        fail.Append($"\nSTDERR: {OutputTrim.Middle(resultError, 500, 1500)}");
+                    if (resultOutput.Length > 0)
+                        fail.Append($"\nSTDOUT: {resultOutput}");
+                    return new ExecutionResult(false, fail.ToString());
+                }
+
+                // Exit 0 with stderr content: surface it labeled instead of swallowing it
+                // (warnings, partial errors). Skip powershell.exe's CLIXML stream noise —
+                // it's serialized progress/verbose records, not plain-text errors.
+                if (resultError.Length > 0 && !resultError.StartsWith("#< CLIXML"))
+                {
+                    string stderrNote = $"STDERR (exit 0): {OutputTrim.Middle(resultError, 300, 700)}";
+                    resultOutput = resultOutput.Length > 0 ? $"{resultOutput}\n{stderrNote}" : stderrNote;
+                }
 
                 return new ExecutionResult(true, string.IsNullOrEmpty(resultOutput) ? "(no output)" : resultOutput);
             }

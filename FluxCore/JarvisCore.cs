@@ -332,6 +332,13 @@ USE ONLY APIs THAT ACTUALLY EXIST. Inventing an API wastes steps and breaks the 
   - If a COM object / API fails with 'invalid class' / 'not found' / 'does not contain a definition',
     the API probably DOES NOT EXIST. Do NOT retry spelling variations of an invented API —
     switch immediately to a documented capability or report the limitation via [[RESPOND:...]] TASK_FAILED.
+  - TEXT ENCODINGS when passing files between tools:
+      Files written by RUN_SHELL (Out-File, >, Set-Content) are UTF-8 WITH BOM — in Python read
+      them with open(path, encoding='utf-8-sig'). If a file's text appears as letters separated
+      by spaces (' P r o c e s s N a m e '), that file is UTF-16 → open(path, encoding='utf-16').
+  - Long command output is trimmed in the MIDDLE (marked '…[N chars omitted…]…'); the beginning
+    and the END are always shown. Print your script's conclusion LAST and read it from the end
+    of the output. NEVER state a result you did not actually see in the output.
 </grounding>
 
 <rules priority=""critical"">
@@ -922,11 +929,12 @@ import pygame
                         if (outcome.Success)
                         {
                             successfulActions.Add($"ok {currentAction}");
-                            // Include actual command output so AI can see results
+                            // Include actual command output so AI can see results.
+                            // HEAD+TAIL — this is the cap the model ACTUALLY sees (tighter than
+                            // CodeExecutionAgent's 5000). The old head-only 1000-char cut hid a
+                            // script's final printed result and the model fabricated it instead.
                             string output = string.IsNullOrWhiteSpace(outcome.Message) ? ""
-                                : outcome.Message.Length > 1000
-                                    ? outcome.Message.Substring(0, 1000) + "...(truncated)"
-                                    : outcome.Message;
+                                : OutputTrim.Middle(outcome.Message, 500, 1000);
                             executedCmds.Add(string.IsNullOrEmpty(output)
                                 ? $"ok {currentAction}"
                                 : $"ok {currentAction}\nOutput: {output}");
@@ -941,8 +949,9 @@ import pygame
                                 && outcome.Message.Length > 5
                                 && !outcome.Message.StartsWith("Waited"))
                             {
+                                // TAIL-keep: a data command's answer prints at the END of its output
                                 lastDataOutput = outcome.Message.Length > 500
-                                    ? outcome.Message[..500] + "..."
+                                    ? "…" + outcome.Message[^500..]
                                     : outcome.Message;
                                 OnCommandOutput?.Invoke(lastDataOutput);
                             }
@@ -993,9 +1002,12 @@ import pygame
                                 return outcome.Message;
                             }
 
-                            string failureMsg = $"FAILED: {currentAction} -> {outcome.Message}";
+                            // Same head+tail cap as the success path — failure messages now carry
+                            // STDOUT+STDERR from the executor and were previously uncapped here
+                            string failOutput = OutputTrim.Middle(outcome.Message, 500, 1000);
+                            string failureMsg = $"FAILED: {currentAction} -> {failOutput}";
                             failedAttempts.Add(failureMsg);
-                            executedCmds.Add($"FAIL {currentAction} -> {outcome.Message}");
+                            executedCmds.Add($"FAIL {currentAction} -> {failOutput}");
 
                             // REAL-TIME LEARNING — only for UI commands where a reusable lesson exists.
                             // Script failures (RUN_SHELL/PYTHON/RUN_CSHARP) are task-specific: their error

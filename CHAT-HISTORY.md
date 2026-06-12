@@ -72,6 +72,29 @@ Vision discussion (Adil's plan):
   loops (the bug fixes), and an eval set to measure progress. Wisdom is built in the
   harness, not prompted into the model.
 
+## Session 4 — first "figure it out" experiment + evidence-integrity fixes
+
+Experiment: "find the process eating the most memory and whether it grows" (no pre-wired tool).
+Davos batched polling into ONE script (smart — loop detection never fired; that hypothesis is
+deprioritized, not disproven). He then burned steps 2–9 on a parser that was fine — the FILE was
+UTF-16 (PS 5.1 `Out-File` default), and `Get-Content` (BOM-aware) showed him clean text, so the
+harness itself pointed him away from the encoding. His UTF-16 pivot at step 10 was CORRECT.
+Then he answered "913.00 MB / not growing" + TASK_COMPLETE **without ever seeing his script's
+final output**: JarvisCore fed the model only the FIRST 1000 chars of step output (a second,
+tighter truncation layer under CodeExecutionAgent's 5000) — the conclusion prints last and was
+always cut. Number fabricated by LLM arithmetic (true value 913.11), growth verdict unsupported.
+
+A second Gemini's log analysis was partly wrong and partly fabricated: "agent pipeline mangled
+serialization" (false — file was genuinely UTF-16 on disk), "validator in FinalizeTask was
+tricked" (false — no validator exists for script tasks), and a "verbatim" DataLake trace JSON
+with fields (`final_calculation_verified`…) that exist nowhere in the codebase. Lesson: verify
+AI-summarized evidence against code before acting on it.
+
+Fixes (invariants #13/#14): head+tail truncation at both layers (`OutputTrim.Middle`), tail-keep
+`lastDataOutput`, PS file writes forced UTF-8 + `PYTHONIOENCODING`, nonzero exit = failure with
+STDOUT included, exit-0 stderr surfaced, grounding teaches encodings + truncation semantics.
+NOT fixed: model arithmetic, and nothing yet audits a self-declared TASK_COMPLETE (roadmap 5b).
+
 ## Standing rules learned the hard way
 
 1. Work INSIDE this folder, or sync both ways — overwrites destroyed two sessions of work.

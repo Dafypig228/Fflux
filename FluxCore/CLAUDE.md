@@ -136,6 +136,24 @@ User input (text/voice)
     opener — without the bound, the "last ]]\n" fallback swallowed following commands
     into script bodies while they ALSO executed separately.
 
+13. **Output truncation keeps HEAD + TAIL, never cuts the end** (`OutputTrim.Middle`).
+    A script prints its conclusion LAST. There are TWO truncation layers: CodeExecutionAgent
+    (5000 chars) and JarvisCore step context (1500 chars — this is what the model actually
+    sees). Head-only truncation at either layer hides the script's final result and the
+    model fabricates it (2026-06-12 memory-task transcript: invented "913.00 MB" + an
+    unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
+    The `<grounding>` section documents the marker; keep them in sync.
+
+14. **Script evidence honesty** (`RunProcessAsync` / `RunPowerShellAsync`):
+    - PS 5.1 defaults `Out-File`/`>` to UTF-16 LE → Python reads NUL-riddled garbage.
+      The utf8Prefix forces `$PSDefaultParameterValues['Out-File:Encoding']='utf8'` (+
+      Set-Content/Add-Content/Export-Csv). Result is UTF-8 WITH BOM → Python side must use
+      `encoding='utf-8-sig'` (taught in `<grounding>`). Verified empirically on this machine.
+    - Nonzero exit code is ALWAYS a failure (old code needed non-empty stderr too, so a
+      silent `exit 1` reported success). Failure messages include STDOUT — pre-crash prints
+      are evidence. Exit-0 stderr is surfaced labeled (CLIXML noise filtered).
+    - `PYTHONIOENCODING=utf-8` is set for all spawned processes.
+
 ---
 
 ## Catalog of the 26 fixed bugs (for re-verification after any overwrite)
@@ -155,6 +173,10 @@ GenerateNaturalResponse · dead DescribeActionNaturally branches.
 Grounding: Chrome.GetRecentPages + ScriptGlobals.Chrome + `<grounding>` prompt section +
 CTRL+SHIFT+A route (#10).
 Security: hardcoded key removed → settings/env (#9).
+Session 4 (2026-06-12, transcript-driven): head+tail truncation at both layers + tail-keep
+lastDataOutput (#13) · PS file writes forced UTF-8 + PYTHONIOENCODING (#14) · nonzero exit =
+failure, stdout in failures, exit-0 stderr surfaced (#14) · grounding: encodings + truncation
+marker semantics + "never state a result you did not see".
 Dead code deleted (backups in `.cleanup-backup\`): legacy MainWindow.Permissions pipeline
 (2nd ExtractAllCommands + WRITE_FILE/RUN_NODE/DOWNLOAD_FILE), ValidatorAgent.ValidateAsync,
 FluxBrain Handle{TaskQuery,MultiTask,SelfCoding}Async + OnHideWindow + IntentType trim,
@@ -168,7 +190,7 @@ root `nul` file.
 - **Git**: the project root has its own repo (`master`). Commit checkpoints after meaningful
   changes. If Adil copies files in from elsewhere, `git diff` reveals what changed.
 - **Build** after every change set: `dotnet build FluxCore\FluxCore.csproj` → must be 0 errors
-  (26 pre-existing nullable warnings are normal).
+  (~27 pre-existing nullable warnings are normal; the count drifts, errors don't).
 - **No tests exist yet.** Highest-value first test: walk every advertised command through
   parse → execute (registry sync, invariant #1).
 - The C++ ImGui overlay (`FluxCore.vcxproj`, `imgui\`) is a separate experiment — ignore.
@@ -189,5 +211,10 @@ root `nul` file.
    (ModelRouter exists).
 5. **Eval set** — ~10 fixed tasks (clean desktop, list tabs, send TG message, write+run script…)
    run after every change. This is how "did he get smarter?" becomes measurable.
+5b. **Completion audit** (designed 2026-06-12, NOT built) — on TASK_COMPLETE, one cheap LLM call:
+   "does the evidence in the last steps support the claimed answer?" Inconclusive → accept
+   (a false-FAILURE auditor poisons the loop, same lesson as invariant #7). This is the only
+   planned defense against confident fabricated answers; truncation fixes reduce but don't
+   eliminate them.
 6. (Larger refactor, recommended) migrate JarvisCore from `[[COMMAND:arg]]` string protocol to
    Gemini native function calling — deletes the parser and its whole bug class.
