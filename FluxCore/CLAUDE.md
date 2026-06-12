@@ -177,6 +177,13 @@ Session 4 (2026-06-12, transcript-driven): head+tail truncation at both layers +
 lastDataOutput (#13) · PS file writes forced UTF-8 + PYTHONIOENCODING (#14) · nonzero exit =
 failure, stdout in failures, exit-0 stderr surfaced (#14) · grounding: encodings + truncation
 marker semantics + "never state a result you did not see".
+
+**Task traces for debugging**: every task exit through `FinalizeTask` writes the verbatim
+model dialogue (post-truncation — exactly what the model saw) to
+`%APPDATA%\Davos\traces\trace_yyyyMMdd_HHmmss.md`. When analyzing a run, grep THAT file —
+do not paste UI logs into AI sessions (2-3x duplicated, model-side context missing) and do
+not trust third-party AI summaries of logs (a Gemini summary fabricated a trace JSON on
+2026-06-12). User-cancel and safety-stop exits leave no trace file.
 Dead code deleted (backups in `.cleanup-backup\`): legacy MainWindow.Permissions pipeline
 (2nd ExtractAllCommands + WRITE_FILE/RUN_NODE/DOWNLOAD_FILE), ValidatorAgent.ValidateAsync,
 FluxBrain Handle{TaskQuery,MultiTask,SelfCoding}Async + OnHideWindow + IntentType trim,

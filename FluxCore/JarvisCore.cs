@@ -1305,6 +1305,8 @@ import pygame
                 $"{(success ? "COMPLETED" : "FAILED")} after {steps} steps " +
                 $"[{string.Join(",", usedCommandTypes)}]: {userRequest.Substring(0, Math.Min(80, userRequest.Length))}");
 
+            WriteTaskTraceFile(userRequest, success, steps, usedCommandTypes, conversationHistory);
+
             _memory.ReinforceLessons(taskSucceeded: success);
 
             // Fire-and-forget on a history snapshot — never block the user's result
@@ -1317,6 +1319,50 @@ import pygame
                 : GenerateNaturalResponse(userRequest, successfulActions, failedAttempts, success, lastDataOutput);
             OnResponse?.Invoke(response);
             return response;
+        }
+
+        /// <summary>
+        /// Persists the verbatim model dialogue — post-truncation, exactly what the model
+        /// saw and said — to one file per task in %APPDATA%\Davos\traces\. This is the
+        /// ground-truth artifact for debugging sessions: grep this file instead of pasting
+        /// UI logs (which are duplicated 2-3x and contain none of the model-side context).
+        /// Covers TASK_COMPLETE / TASK_FAILED / max-steps exits; user-cancel and safety-stop
+        /// return before FinalizeTask and leave no trace file.
+        /// </summary>
+        private void WriteTaskTraceFile(string userRequest, bool success, int steps,
+            HashSet<string> usedCommandTypes, List<ChatMessage> conversationHistory)
+        {
+            try
+            {
+                string dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Davos", "traces");
+                Directory.CreateDirectory(dir);
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"# Davos task trace — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                sb.AppendLine($"TASK: {userRequest}");
+                sb.AppendLine($"OUTCOME: {(success ? "COMPLETED" : "FAILED")} after {steps} steps " +
+                              $"[{string.Join(",", usedCommandTypes)}]");
+                sb.AppendLine();
+                int turn = 0;
+                foreach (var msg in conversationHistory)
+                {
+                    turn++;
+                    sb.AppendLine($"--- [{turn}] {(msg.IsUser ? "TO MODEL" : "FROM MODEL")} ---");
+                    sb.AppendLine(msg.Text);
+                    sb.AppendLine();
+                }
+
+                string file = Path.Combine(dir, $"trace_{DateTime.Now:yyyyMMdd_HHmmss}.md");
+                File.WriteAllText(file, sb.ToString(), Encoding.UTF8);
+                _logToUI($"[📄] Trace saved: {file}");
+            }
+            catch (Exception ex)
+            {
+                // Trace persistence must never break task finalization
+                System.Diagnostics.Debug.WriteLine($"[Trace] Write failed: {ex.Message}");
+            }
         }
     }
 }
