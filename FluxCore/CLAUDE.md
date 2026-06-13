@@ -146,6 +146,14 @@ User input (text/voice)
     unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
     The `<grounding>` section documents the marker; keep them in sync.
 
+18. **Verify-before-complete gate** (`BlockAssumedCompletion` / `LooksLikeAssumedSuccess`).
+    When the model declares TASK_COMPLETE but its OWN reasoning admits it guessed (`AssumptionMarkers`:
+    "assume", "should have", "can't see the screen"…), the completion is BLOCKED and it's told to
+    state concrete on-screen evidence or report TASK_FAILED honestly — instead of "I assume the
+    search worked" becoming a reported success (Steam trace 2026-06-13). Only gates POSITIVE
+    completion (honest failure always allowed); max 2 challenges/task (no infinite loop). High-
+    precision string match on admitted assumption — not a full evidence audit (roadmap 5b proper).
+
 17. **Robust foreground activation** (`ForceForegroundWindow` / `ForceFocus` / `EnsureFocusAsync`).
     Bare `SetForegroundWindow` is SILENTLY IGNORED when another process owns the foreground
     (overlays — Overwolf/NVIDIA/PWGood — or the focus-lock timeout). That made Telegram/Steam

@@ -510,6 +510,7 @@ import pygame
             int lastProgressStep = 0;                // Last step where successfulActions grew
             int previousSuccessCount = 0;            // Track success count changes
             int consecutiveFailSteps = 0;            // Steps where ALL commands failed
+            int assumptionChallenges = 0;            // Times we blocked an assumed (unverified) completion
 
             // AUTO-GRANT: Screen access always allowed — user explicitly requested no permission prompts
             _screenAccessGranted = true;
@@ -846,6 +847,9 @@ import pygame
                 // exit path (the old early return skipped unlock, trace, reflexion and HUD reset)
                 if ((isTaskComplete || isTaskFailed) && actionCommands.Count == 0)
                 {
+                    if (BlockAssumedCompletion(isTaskComplete, isTaskFailed, aiResponse,
+                            ref assumptionChallenges, conversationHistory, failedAttempts))
+                        continue;
                     return FinalizeTask(userRequest, !isTaskFailed, successfulActions, failedAttempts,
                         lastDataOutput, lastRespondText, conversationHistory, usedCommandTypes, iteration + 1);
                 }
@@ -1250,6 +1254,10 @@ import pygame
                     // After TASK_COMPLETE / TASK_FAILED with actions, we're done
                     if (isTaskComplete || isTaskFailed)
                     {
+                        // VERIFY-BEFORE-COMPLETE: don't accept a success the model only ASSUMED.
+                        if (BlockAssumedCompletion(isTaskComplete, isTaskFailed, aiResponse,
+                                ref assumptionChallenges, conversationHistory, failedAttempts))
+                            continue;
                         log.AppendLine($"[{(isTaskFailed ? "✗" : "✓")}] Task {(isTaskFailed ? "failed" : "completed")} after {iteration + 1} steps");
                         return FinalizeTask(userRequest, !isTaskFailed, successfulActions, failedAttempts,
                             lastDataOutput, lastRespondText, conversationHistory, usedCommandTypes, iteration + 1);
@@ -1419,6 +1427,52 @@ import pygame
         /// HUD never reset, no task_trace was written and memory was never
         /// reinforced. Every terminal return now funnels through here.
         /// </summary>
+        // Phrases where the model ADMITS it is guessing the outcome rather than seeing it.
+        // High precision on purpose — we only block completion when the model itself says it
+        // assumed (e.g. Steam "I need to assume the search was successful" → TASK_COMPLETE).
+        private static readonly string[] AssumptionMarkers =
+        {
+            "assume", "assuming", "presumably", "i presume", "should have", "should now be",
+            "i believe it", "probably", "most likely", "hopefully", "must have worked",
+            "if the search", "if it was successful", "without seeing", "can't see the screen",
+            "cannot see the screen", "i'll trust", "i will trust", "i can't verify", "cannot verify"
+        };
+
+        private static bool LooksLikeAssumedSuccess(string aiResponse)
+        {
+            if (string.IsNullOrEmpty(aiResponse)) return false;
+            string low = aiResponse.ToLowerInvariant();
+            return AssumptionMarkers.Any(m => low.Contains(m));
+        }
+
+        /// <summary>
+        /// VERIFY-BEFORE-COMPLETE gate. When the model declares TASK_COMPLETE but its own
+        /// reasoning admits it ASSUMED the result (didn't verify), block the completion and
+        /// demand evidence instead of letting "I assume it worked" become a reported success.
+        /// Only gates positive completion (failing honestly is always allowed) and at most twice
+        /// per task (so a genuinely-stuck model can't loop forever). Returns true if blocked.
+        /// </summary>
+        private bool BlockAssumedCompletion(bool isTaskComplete, bool isTaskFailed, string aiResponse,
+            ref int challenges, List<ChatMessage> conversationHistory, List<string> failedAttempts)
+        {
+            if (!isTaskComplete || isTaskFailed) return false;       // honest failure is fine
+            if (challenges >= 2) return false;                       // don't loop forever
+            if (!LooksLikeAssumedSuccess(aiResponse)) return false;  // only when it admits guessing
+            challenges++;
+            conversationHistory.Add(new ChatMessage
+            {
+                Text = "⛔ NOT DONE. Your own reasoning shows you ASSUMED success instead of " +
+                       "verifying it. Do NOT claim completion on assumption. Look at the CURRENT " +
+                       "screen or command output and state the SPECIFIC evidence that the goal is " +
+                       "actually achieved (what you concretely see). If that evidence is not there, " +
+                       "report honestly with [[RESPOND:...]] TASK_FAILED. Take your next action now.",
+                IsUser = true
+            });
+            _logToUI("[🔎] Blocked assumed completion — demanding verification");
+            failedAttempts.Add("Declared success on assumption — challenged to verify");
+            return true;
+        }
+
         private string FinalizeTask(
             string userRequest, bool success,
             List<string> successfulActions, List<string> failedAttempts,
