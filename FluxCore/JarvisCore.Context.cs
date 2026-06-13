@@ -97,21 +97,52 @@ namespace FluxCore
         /// <summary>
         /// Extracts ALL commands from AI response, in order of appearance.
         /// </summary>
+        /// <summary>
+        /// THE single registry of every parseable command name. A command must appear here
+        /// or ExtractAllCommands silently drops it — the model then loops "no command provided"
+        /// for 30 steps thinking it has a formatting bug (FIND_AND_CLICK shipped 2026-06-13
+        /// wired into the dispatch switch + ScreenCommands + prompt but NOT here → invisible).
+        /// Registering a new command = add it HERE, to the dispatch switch in
+        /// ExecuteSingleCommandAsync, to the &lt;tools&gt; prompt, and (if it touches the screen)
+        /// to ScreenCommands. Unknown `[[TOKEN:...]]` now fails LOUD via DetectUnknownCommand.
+        /// </summary>
+        private static readonly string[] KnownCommandTypes = {
+            // Primary (advertised in prompt)
+            "CLICK", "TYPE", "KEYS", "SCROLL", "RUN_SHELL", "OPEN_APP", "RESPOND",
+            "FIND_AND_CLICK", "VISION_CLICK",
+            // Scripting & background process management
+            "RUN_CSHARP", "CSHARP", "CS",
+            "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",
+            // Legacy aliases (not in prompt, still parsed for backward compat)
+            "HIDE_SELF", "MINIMIZE_SELF", "POWERSHELL", "PS", "RUN_PYTHON", "PYTHON",
+            "WAIT", "LOG", "WINDOW", "DRAG", "DRAGGING",
+            "CLICKING", "LAUNCHING", "OPENING", "TYPING",
+            "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO", "REJECT"
+        };
+
+        /// <summary>
+        /// Returns the first command-shaped token (`[[TOKEN:` or `[[TOKEN]]`) whose name is
+        /// NOT in KnownCommandTypes, or null. Lets the loop tell the model "TOKEN is not a real
+        /// command" instead of the misleading "you provided no command" — the difference
+        /// between a 1-step correction and a 30-step spin.
+        /// </summary>
+        private string? DetectUnknownCommand(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(text, @"\[\[([A-Za-z_]+)\s*[:\]]"))
+            {
+                string token = m.Groups[1].Value;
+                if (!KnownCommandTypes.Contains(token, StringComparer.OrdinalIgnoreCase))
+                    return token;
+            }
+            return null;
+        }
+
         private List<(string Type, string Arg)> ExtractAllCommands(string text)
         {
             var result = new List<(string Type, string Arg, int Position)>();
-            var commandTypes = new[] {
-                // Primary (advertised in prompt)
-                "CLICK", "TYPE", "KEYS", "SCROLL", "RUN_SHELL", "OPEN_APP", "RESPOND",
-                // Scripting & background process management
-                "RUN_CSHARP", "CSHARP", "CS",
-                "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",
-                // Legacy aliases (not in prompt, still parsed for backward compat)
-                "HIDE_SELF", "MINIMIZE_SELF", "POWERSHELL", "PS", "RUN_PYTHON", "PYTHON",
-                "WAIT", "LOG", "WINDOW", "DRAG", "DRAGGING",
-                "CLICKING", "LAUNCHING", "OPENING", "TYPING",
-                "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO", "REJECT"
-            };
+            var commandTypes = KnownCommandTypes;
 
             foreach (var cmdType in commandTypes)
             {

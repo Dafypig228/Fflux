@@ -1275,6 +1275,25 @@ import pygame
                 {
                     noCommandCount++;
 
+                    // LOUD unknown-command feedback: if the model emitted a command-shaped
+                    // token that isn't registered (e.g. a new command missing from
+                    // KnownCommandTypes, or a typo), tell it EXACTLY that — otherwise it sees
+                    // the generic "no command" nudge and loops for 30 steps blaming its
+                    // formatting (FIND_AND_CLICK, 2026-06-13).
+                    string? unknownCmd = DetectUnknownCommand(commandText);
+                    if (unknownCmd != null)
+                    {
+                        conversationHistory.Add(new ChatMessage
+                        {
+                            Text = $"⚠ '{unknownCmd}' is NOT a valid command and was ignored. " +
+                                   "Use only commands from the <tools> list. " +
+                                   "Re-read the available tools and choose a real one for your next action.",
+                            IsUser = true
+                        });
+                        _logToUI($"[⚠️] Unknown command ignored: {unknownCmd}");
+                        failedAttempts.Add($"Unknown command: {unknownCmd}");
+                    }
+
                     // Log the AI's thought/plan (it's thinking, not done)
                     if (iteration == 0 && !string.IsNullOrWhiteSpace(aiResponse))
                     {

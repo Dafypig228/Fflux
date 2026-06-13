@@ -146,6 +146,13 @@ User input (text/voice)
     unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
     The `<grounding>` section documents the marker; keep them in sync.
 
+16. **Registering a command touches 4 sites — miss one and it fails differently:**
+    `KnownCommandTypes` (parser registry; miss → silently dropped, model loops "no command"),
+    the dispatch switch in `ExecuteSingleCommandAsync` (miss → "Unknown command"),
+    the `<tools>` prompt (miss → model never uses it), and `ScreenCommands` if it touches the
+    screen (miss → wrong access-gating/retry). Unknown `[[TOKEN:...]]` now fails LOUD via
+    `DetectUnknownCommand`. (FIND_AND_CLICK shipped missing the registry, 2026-06-13.)
+
 15. **Vision-grounded click** (`VisionGroundedClickAsync`, cmd `[[FIND_AND_CLICK:desc]]`).
     The router's fallback for targets with NO accessibility tree (Telegram desktop, games,
     canvas/WebGL UIs) where the UIA element list is empty and pixel-guessing fails. Asks the
