@@ -63,6 +63,25 @@ namespace FluxCore
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+        // ── Robust foreground activation (defeats focus-stealing prevention) ──
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool AllowSetForegroundWindow(int dwProcessId);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref uint pvParam, uint fWinIni);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, UIntPtr pvParam, uint fWinIni);
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        private const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
+        private const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
+        private const uint SPIF_SENDWININICHANGE = 0x0002;
+        private const int  ASFW_ANY = -1;
+
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
         private const uint MOUSEEVENTF_WHEEL = 0x0800;
@@ -396,38 +415,82 @@ namespace FluxCore
         }
 
         /// <summary>
-        /// Ensures the target window is focused. Uses multiple strategies if needed.
+        /// Ensures the target window is actually frontmost before we click/type into it.
+        /// Returns true if the target IS foreground at the end — callers can stop guessing.
         /// </summary>
-        public async Task EnsureFocusAsync(IntPtr targetWindow)
+        public async Task<bool> EnsureFocusAsync(IntPtr targetWindow)
         {
-            if (targetWindow == IntPtr.Zero) return;
+            if (targetWindow == IntPtr.Zero) return false;
+            if (GetForegroundWindow() == targetWindow) return true;
 
-            IntPtr current = GetForegroundWindow();
-            if (current == targetWindow) return;
+            // Robust force-foreground, a few tries with short settles (overlays like Overwolf/
+            // NVIDIA fight back for a moment after launch).
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (ForceForegroundWindow(targetWindow)) return true;
+                await Task.Delay(80);
+            }
 
-            SetForegroundWindow(targetWindow);
-            await Task.Delay(100);
-            if (GetForegroundWindow() == targetWindow) return;
-
-            ShowWindow(targetWindow, SW_RESTORE);
-            await Task.Delay(50);
-            SetForegroundWindow(targetWindow);
-            await Task.Delay(100);
-            if (GetForegroundWindow() == targetWindow) return;
-
-            keybd_event(0x12, 0, 0, UIntPtr.Zero);
-            SetForegroundWindow(targetWindow);
-            keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            await Task.Delay(100);
-            if (GetForegroundWindow() == targetWindow) return;
-
+            // Last resort: minimize/restore bounce, which kicks even stubborn windows, then force again.
             ShowWindow(targetWindow, SW_MINIMIZE);
-            await Task.Delay(50);
+            await Task.Delay(40);
             ShowWindow(targetWindow, SW_RESTORE);
-            SetForegroundWindow(targetWindow);
-            await Task.Delay(150);
+            bool ok = ForceForegroundWindow(targetWindow);
+            await Task.Delay(80);
 
-            System.Diagnostics.Debug.WriteLine($"[Automation] Focus attempt complete. Current: {GetWindowTitle(GetForegroundWindow())}");
+            System.Diagnostics.Debug.WriteLine($"[Automation] Focus result={ok || GetForegroundWindow() == targetWindow}. Current: {GetWindowTitle(GetForegroundWindow())}");
+            return GetForegroundWindow() == targetWindow;
+        }
+
+        /// <summary>Public entry: force any window to the foreground. Used by OPEN_APP and the
+        /// task loop so "I opened X" is only reported when X is actually in front.</summary>
+        public bool ForceFocus(IntPtr hWnd) => ForceForegroundWindow(hWnd);
+
+        /// <summary>
+        /// Forces an arbitrary window to the foreground, defeating Windows' focus-stealing
+        /// prevention. SetForegroundWindow ALONE is silently ignored when another process owns
+        /// the foreground (overlays, or the lock timeout) — that's why Telegram/Steam stayed
+        /// behind Steam/Overwolf/PWGood and Davos typed blind. Proven recipe (verified across
+        /// machines): drop SPI_FOREGROUNDLOCKTIMEOUT to 0, AllowSetForegroundWindow(ANY), then
+        /// AttachThreadInput our thread to BOTH the current-foreground thread AND the target
+        /// thread so Windows treats us as "related", then ShowWindow + BringWindowToTop +
+        /// SetForegroundWindow. ALWAYS detaches in finally — a leaked AttachThreadInput hangs us
+        /// if the target ever stops responding. Returns true only if the target really is foreground.
+        /// </summary>
+        private bool ForceForegroundWindow(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return false;
+            if (GetForegroundWindow() == hWnd) return true;
+
+            uint appThread = GetCurrentThreadId();
+            uint foreThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+            uint targetThread = GetWindowThreadProcessId(hWnd, out _);
+
+            uint oldTimeout = 0;
+            try { SystemParametersInfo(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, ref oldTimeout, 0); } catch { }
+            try { SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, UIntPtr.Zero, SPIF_SENDWININICHANGE); } catch { }
+            try { AllowSetForegroundWindow(ASFW_ANY); } catch { }
+
+            bool attachedFore = false, attachedTarget = false;
+            try
+            {
+                if (foreThread != 0 && foreThread != appThread)
+                    attachedFore = AttachThreadInput(appThread, foreThread, true);
+                if (targetThread != 0 && targetThread != appThread && targetThread != foreThread)
+                    attachedTarget = AttachThreadInput(appThread, targetThread, true);
+
+                ShowWindow(hWnd, SW_RESTORE);
+                BringWindowToTop(hWnd);
+                SetForegroundWindow(hWnd);
+            }
+            finally
+            {
+                if (attachedFore) AttachThreadInput(appThread, foreThread, false);
+                if (attachedTarget) AttachThreadInput(appThread, targetThread, false);
+                try { SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (UIntPtr)oldTimeout, SPIF_SENDWININICHANGE); } catch { }
+            }
+
+            return GetForegroundWindow() == hWnd;
         }
 
         /// <summary>

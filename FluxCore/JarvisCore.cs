@@ -899,7 +899,7 @@ import pygame
                                 var hwnd = FindWindowByName(targetApp);
                                 if (hwnd != IntPtr.Zero)
                                 {
-                                    SetForegroundWindow(hwnd);
+                                    _automation.ForceFocus(hwnd); // robust: AttachThreadInput, not bare SetForegroundWindow
                                     await Task.Delay(100);
                                 }
                             }
@@ -1057,8 +1057,22 @@ import pygame
                                 if (targetHwnd != IntPtr.Zero)
                                 {
                                     _automation.SetLockedTarget(targetHwnd);
-                                    SetForegroundWindow(targetHwnd);
-                                    await Task.Delay(100);
+                                    // Robustly bring it to front and TELL the model whether it
+                                    // actually worked — so it stops typing blind into the wrong
+                                    // window and reporting "opened X" when X is still behind.
+                                    bool front = _automation.ForceFocus(targetHwnd);
+                                    await Task.Delay(120);
+                                    if (!front && _getActiveWindow() is string aw &&
+                                        !aw.ToLower().Contains(cmd.Arg.ToLower()))
+                                    {
+                                        conversationHistory.Add(new ChatMessage
+                                        {
+                                            Text = $"⚠ FOCUS: '{cmd.Arg}' was launched but is NOT frontmost — " +
+                                                   $"active window is still '{aw}'. Before typing/clicking, re-issue " +
+                                                   $"[[OPEN_APP:{cmd.Arg}]] or verify on screen. Do NOT assume it is focused.",
+                                            IsUser = true
+                                        });
+                                    }
                                 }
                             }
                         }

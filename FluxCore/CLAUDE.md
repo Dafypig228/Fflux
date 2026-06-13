@@ -146,6 +146,18 @@ User input (text/voice)
     unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
     The `<grounding>` section documents the marker; keep them in sync.
 
+17. **Robust foreground activation** (`ForceForegroundWindow` / `ForceFocus` / `EnsureFocusAsync`).
+    Bare `SetForegroundWindow` is SILENTLY IGNORED when another process owns the foreground
+    (overlays — Overwolf/NVIDIA/PWGood — or the focus-lock timeout). That made Telegram/Steam
+    stay behind, so Davos typed blind into the wrong window and declared "opened X" / success it
+    never achieved (traces 2026-06-13 20:xx). The proven recipe: SPI_FOREGROUNDLOCKTIMEOUT→0 +
+    AllowSetForegroundWindow(ANY) + AttachThreadInput(our thread ↔ BOTH foreground AND target
+    threads) + ShowWindow + BringWindowToTop + SetForegroundWindow, ALWAYS detaching in finally
+    (a leaked attach hangs us if the target stops responding). `EnsureFocusAsync` (pre click/type)
+    now returns whether focus actually took; after OPEN_APP the loop verifies frontmost and warns
+    the model if not — so it stops assuming focus. Research: AttachThreadInput is THE missing piece
+    (west-wind/oldnewthing). Do NOT regress to bare SetForegroundWindow.
+
 16. **Registering a command touches 4 sites — miss one and it fails differently:**
     `KnownCommandTypes` (parser registry; miss → silently dropped, model loops "no command"),
     the dispatch switch in `ExecuteSingleCommandAsync` (miss → "Unknown command"),
