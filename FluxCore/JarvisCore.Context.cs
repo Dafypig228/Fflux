@@ -109,7 +109,7 @@ namespace FluxCore
         private static readonly string[] KnownCommandTypes = {
             // Primary (advertised in prompt)
             "CLICK", "TYPE", "KEYS", "SCROLL", "RUN_SHELL", "OPEN_APP", "RESPOND",
-            "FIND_AND_CLICK", "VISION_CLICK",
+            "FIND_AND_CLICK", "VISION_CLICK", "WINDOW_STATE",
             // Scripting & background process management
             "RUN_CSHARP", "CSHARP", "CS",
             "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",

@@ -107,7 +107,7 @@ namespace FluxCore
             "POWERSHELL", "PS", "PYTHON", "RUN_PYTHON", "RUN_SHELL",
             "RUN_CSHARP", "CSHARP", "CS",
             "START_BACKGROUND", "READ_LOG", "CHECK_BACKGROUND", "STOP_BACKGROUND",
-            "REJECT", "WAIT", "LOG"
+            "REJECT", "WAIT", "LOG", "WINDOW_STATE"
         };
 
         // Commands that REQUIRE screen access
@@ -327,7 +327,11 @@ FINISHING THE TASK (exact protocol):
   [[TYPE:text]]              - Type text into the CURRENTLY FOCUSED input field
   [[KEYS:combo]]             - Keyboard shortcut: ENTER, TAB, CTRL+C, CTRL+L, WIN+D, ALT+F4, ESCAPE
   [[SCROLL:up/down]]         - Scroll the active window
-  [[OPEN_APP:name]]          - Open or focus an application
+  [[OPEN_APP:name]]          - Open or focus an application (BLOCKS until it is actually
+                               foreground+responsive, or reports it failed to focus — you do NOT
+                               need to guess or wait yourself)
+  [[WINDOW_STATE]]           - Ask what window is focused RIGHT NOW (instant, free). Use it to
+                               KNOW the state instead of assuming, before typing/clicking
   [[RESPOND:text]]           - Your final answer/report to the user (pair with TASK_COMPLETE or TASK_FAILED)
   [[REJECT:reason]]          - Exit when task is genuinely impossible with available tools
 
@@ -1036,13 +1040,24 @@ import pygame
                             if (cmdTypeUp == "RESPOND" && !string.IsNullOrWhiteSpace(outcome.Message))
                                 lastRespondText = outcome.Message;
 
-                            // WINDOW CHANGE WARNING: Click succeeded but opened wrong window
-                            if (outcome.Message.Contains("Window changed"))
+                            // WINDOW CHANGE: a non-OPEN_APP command shifted the foreground window.
+                            // The model's batch was planned for the OLD screen, so the remaining
+                            // commands would fire blind. Stop the batch and re-observe next step
+                            // (cheap: the model re-plans against the actual new screen) instead of
+                            // continuing on a stale prediction. OPEN_APP changes are intentional
+                            // and already gated by the readiness wait above, so exempt them.
+                            if (outcome.Message.Contains("Window changed") &&
+                                cmd.Type.ToUpper() != "OPEN_APP")
                             {
-                                string warning = $"⚠ SIDE EFFECT: {currentAction} changed the window unexpectedly: {outcome.Message}. " +
-                                    "If this was NOT intended, use [[KEYS:ALT+TAB]] or [[OPEN_APP:...]] to go back.";
+                                string warning = $"↻ SCREEN CHANGED after {currentAction}: {outcome.Message}. " +
+                                    "Stopped the rest of this step's actions — they were planned for the previous " +
+                                    "screen. Re-reading the screen now; decide your next action from what's ACTUALLY there.";
                                 failedAttempts.Add(warning);
                                 conversationHistory.Add(new ChatMessage { Text = warning, IsUser = true });
+                                if (cmdIndex < actionCommands.Count)
+                                    skippedCmds.AddRange(actionCommands.Skip(cmdIndex)
+                                        .Select(c => $"NOT_EXECUTED (screen changed): {c.Type}:{c.Arg}"));
+                                break; // abandon the rest of the batch → fresh observation next step
                             }
 
                             // Dynamic targetApp tracking — set when OPEN_APP succeeds
@@ -1061,22 +1076,21 @@ import pygame
                                 if (targetHwnd != IntPtr.Zero)
                                 {
                                     _automation.SetLockedTarget(targetHwnd);
-                                    // Robustly bring it to front and TELL the model whether it
-                                    // actually worked — so it stops typing blind into the wrong
-                                    // window and reporting "opened X" when X is still behind.
-                                    bool front = _automation.ForceFocus(targetHwnd);
-                                    await Task.Delay(120);
-                                    if (!front && _getActiveWindow() is string aw &&
-                                        !aw.ToLower().Contains(cmd.Arg.ToLower()))
+                                    // EVENT-DRIVEN READINESS (no fixed sleep, no "assume it opened"):
+                                    // block here — and therefore the rest of this batched step —
+                                    // until the app is ACTUALLY foreground and responsive, or a real
+                                    // timeout. The next batched command (TYPE/CLICK) only fires once
+                                    // the app it targets is really there.
+                                    bool ready = await _automation.WaitUntilForegroundReadyAsync(targetHwnd, 4000);
+                                    conversationHistory.Add(new ChatMessage
                                     {
-                                        conversationHistory.Add(new ChatMessage
-                                        {
-                                            Text = $"⚠ FOCUS: '{cmd.Arg}' was launched but is NOT frontmost — " +
-                                                   $"active window is still '{aw}'. Before typing/clicking, re-issue " +
-                                                   $"[[OPEN_APP:{cmd.Arg}]] or verify on screen. Do NOT assume it is focused.",
-                                            IsUser = true
-                                        });
-                                    }
+                                        Text = ready
+                                            ? $"✓ FOCUS: '{cmd.Arg}' is now foreground and responsive."
+                                            : $"⚠ FOCUS: '{cmd.Arg}' did NOT become frontmost within 4s " +
+                                              $"(active: '{_getActiveWindow()}'). Do NOT act assuming it is focused — " +
+                                              "re-open it or report the obstacle.",
+                                        IsUser = true
+                                    });
                                 }
                             }
                         }

@@ -146,6 +146,20 @@ User input (text/voice)
     unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
     The `<grounding>` section documents the marker; keep them in sync.
 
+19. **Cheap-state layer — act on KNOWN state, not assumed** (`GetForegroundState`,
+    `WaitUntilForegroundReadyAsync`, `IsResponsive`; cmd `[[WINDOW_STATE]]`). Win32 ground truth
+    (foreground hwnd/title, IsHungAppWindow) is microseconds — NO screenshot, NO LLM. The loop
+    used to fire batched commands on a fixed 50ms guess and OPEN_APP returned with ZERO settle
+    (ExecutionAgent generic launch), so dependent actions hit apps that hadn't drawn yet ("opens
+    app, doesn't wait, continues"). Now: OPEN_APP BLOCKS event-driven until the app is actually
+    foreground+responsive (or a real 4s timeout → honest "not focused" message) — returns the
+    instant it's ready, no fixed sleep. A NON-OPEN_APP command that unexpectedly changes the
+    window ABORTS the rest of the batch → re-observe next step (cheap re-plan, not a blind
+    continue). `[[WINDOW_STATE]]` lets the model QUERY focus instead of assuming. Root-cause fix:
+    the symptoms #17 (focus) / #18 (assumed completion) / timing were all "agent acts on assumed
+    state"; this is the shared cheap-ground-truth layer. Note: the residual 50ms inter-command
+    settle (non-state-changing batched cmds) is an input-processing pause, not a state assumption.
+
 18. **Verify-before-complete gate** (`BlockAssumedCompletion` / `LooksLikeAssumedSuccess`).
     When the model declares TASK_COMPLETE but its OWN reasoning admits it guessed (`AssumptionMarkers`:
     "assume", "should have", "can't see the screen"…), the completion is BLOCKED and it's told to

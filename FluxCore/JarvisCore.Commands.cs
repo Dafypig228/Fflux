@@ -216,6 +216,14 @@ namespace FluxCore
                     // Vision fallback for apps with no usable accessibility tree
                     return await VisionGroundedClickAsync(cmdArg);
 
+                case "WINDOW_STATE":
+                {
+                    // Cheap ground truth — what is focused RIGHT NOW (Win32, no screenshot/LLM)
+                    var (_, fgTitle, fgResponsive) = _automation.GetForegroundState();
+                    return new ExecutionResult(true,
+                        $"Focused window NOW: '{fgTitle}' ({(fgResponsive ? "responsive" : "NOT responding")})");
+                }
+
                 case "SCROLL":
                     var scrollRes = await _automation.ScrollAsync(cmdArg);
                     return new ExecutionResult(scrollRes.Success, scrollRes.Message);

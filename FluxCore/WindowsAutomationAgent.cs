@@ -76,6 +76,8 @@ namespace FluxCore
         private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, UIntPtr pvParam, uint fWinIni);
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")]
+        private static extern bool IsHungAppWindow(IntPtr hwnd);
 
         private const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
         private const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
@@ -445,6 +447,44 @@ namespace FluxCore
         /// <summary>Public entry: force any window to the foreground. Used by OPEN_APP and the
         /// task loop so "I opened X" is only reported when X is actually in front.</summary>
         public bool ForceFocus(IntPtr hWnd) => ForceForegroundWindow(hWnd);
+
+        // ══════════════════════════════════════════════════════════════════════════════
+        // CHEAP STATE LAYER — ground truth from Win32, NO screenshot, NO LLM (microseconds).
+        // The agent should KNOW the real window state, not assume it. Used to gate actions
+        // (wait until ready) instead of firing them on a fixed-time guess.
+        // ══════════════════════════════════════════════════════════════════════════════
+
+        /// <summary>Is this window alive and responding (not hung)? Cheap.</summary>
+        public bool IsResponsive(IntPtr hWnd) => hWnd != IntPtr.Zero && !IsHungAppWindow(hWnd);
+
+        /// <summary>Ground truth the model/harness can read for free: what's focused right now,
+        /// and is it responding. Replaces "I assume X is focused".</summary>
+        public (IntPtr hwnd, string title, bool responsive) GetForegroundState()
+        {
+            IntPtr fg = GetForegroundWindow();
+            return (fg, GetWindowTitle(fg), fg != IntPtr.Zero && !IsHungAppWindow(fg));
+        }
+
+        /// <summary>
+        /// Event-driven readiness wait: polls cheap Win32 state until <paramref name="target"/>
+        /// is ACTUALLY the foreground window AND responsive, re-forcing focus each tick (overlays
+        /// fight back for a beat after launch). Returns the instant it's ready — fast for light
+        /// apps, patient for heavy ones — or false on timeout. This is the replacement for fixed
+        /// sleeps and "assume it opened": never waits longer than reality needs, never less.
+        /// </summary>
+        public async Task<bool> WaitUntilForegroundReadyAsync(IntPtr target, int timeoutMs = 3000, int pollMs = 60)
+        {
+            if (target == IntPtr.Zero) return false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                if (GetForegroundWindow() == target && !IsHungAppWindow(target))
+                    return true;
+                ForceForegroundWindow(target);
+                await Task.Delay(pollMs);
+            }
+            return GetForegroundWindow() == target && !IsHungAppWindow(target);
+        }
 
         /// <summary>
         /// Forces an arbitrary window to the foreground, defeating Windows' focus-stealing
