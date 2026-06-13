@@ -200,14 +200,16 @@ lastDataOutput (#13) · PS file writes forced UTF-8 + PYTHONIOENCODING (#14) · 
 failure, stdout in failures, exit-0 stderr surfaced (#14) · grounding: encodings + truncation
 marker semantics + "never state a result you did not see".
 
-**Task traces for debugging**: every task exit through `FinalizeTask` writes the verbatim
-model dialogue (post-truncation — exactly what the model saw) to
-`%APPDATA%\Davos\traces\trace_yyyyMMdd_HHmmss.md`. When analyzing a run, grep THAT file —
-do not paste UI logs into AI sessions (2-3x duplicated, model-side context missing) and do
-not trust third-party AI summaries of logs (a Gemini summary fabricated a trace JSON on
-2026-06-12). User-cancel and safety-stop exits leave no trace file. CAVEAT: long tasks
-compact early history mid-run, so traces show the final steps + a summary line; for full
-forensics on 10+ step tasks use the UI log (FluxDebug.txt) as well.
+**Task traces for debugging** (`WriteTraceSnapshot`, INCREMENTAL since 2026-06-13): one stable
+file per task `%APPDATA%\Davos\traces\trace_yyyyMMdd_HHmmss.md`, rewritten at the TOP of every
+step and on crash/cancel — so a HUNG, CRASHED, in-progress, or cancelled task ALL leave a
+readable trace, not only completed ones (a hung task can be read LIVE mid-run; the OUTCOME line
+shows `IN PROGRESS (on step N)` / `CRASHED:` / `INTERRUPTED` / `COMPLETED`/`FAILED`). The verbatim
+model dialogue is post-truncation — exactly what the model saw. When analyzing a run, grep THAT
+file — do not paste UI logs into AI sessions (2-3x duplicated, model-side context missing) and
+do not trust third-party AI summaries of logs (a Gemini summary fabricated a trace JSON on
+2026-06-12). CAVEAT: long tasks compact early history mid-run, so traces show the final steps +
+a summary line; for full forensics on 10+ step tasks use the UI log (FluxDebug.txt) as well.
 
 Session 4b (2026-06-12, CAPTCHA + desktop traces): KEYS loop detection is WARN-ONLY
 (hard block forced pathological workarounds; mirrors CLICK-near-loop design) ·

@@ -49,6 +49,7 @@ namespace FluxCore
         private readonly Func<string> _getActiveWindow;
         private readonly Action<string> _logToUI;
         private FluxLogger _logger = new FluxLogger(); // File Logger
+        private string? _currentTraceFile; // per-task live trace path — rewritten every step (incremental + crash-safe)
         private const int MAX_RETRIES = 3;
         private const int MAX_STEPS = 30; // Increased for complex tasks
         private static readonly string DebugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "FluxDebug.txt");
@@ -530,7 +531,21 @@ import pygame
             // Add the user's request as the first message
             conversationHistory.Add(new ChatMessage { Text = userRequest, IsUser = true });
 
+            // LIVE TRACE: one stable file per task, rewritten at the top of every step so a
+            // hung/crashed/in-progress task still leaves a readable trace — not only completed
+            // ones (a silently-dropped command used to look like "started and did nothing").
+            try
+            {
+                string tdir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos", "traces");
+                Directory.CreateDirectory(tdir);
+                _currentTraceFile = Path.Combine(tdir, $"trace_{DateTime.Now:yyyyMMdd_HHmmss}.md");
+            }
+            catch { _currentTraceFile = null; }
+            WriteTraceSnapshot(userRequest, "IN PROGRESS (starting)", conversationHistory);
+
             _logToUI($"[🧠 DAVOS] Starting task: {userRequest}");
+            if (_currentTraceFile != null) _logToUI($"[📄] Live trace: {_currentTraceFile}");
 
             // Track which app we should be working in — set dynamically when OPEN_APP succeeds
             string targetApp = "";
@@ -576,10 +591,17 @@ import pygame
                 "  4. Screen (CLICK/TYPE) — LAST RESORT only if nothing above works\n" +
                 "State your chosen approach briefly in THOUGHT, then act immediately in the SAME response.";
 
+            try
+            {
             for (int iteration = 0; iteration < MAX_STEPS; iteration++)
             {
                 // Check for cancellation at start of each step
                 ct.ThrowIfCancellationRequested();
+
+                // Flush a snapshot BEFORE the (slow, hang-prone) Gemini call so a task stuck
+                // mid-step is visible on disk: captures all prior steps + "on step N".
+                WriteTraceSnapshot(userRequest,
+                    $"IN PROGRESS (on step {iteration + 1}/{MAX_STEPS})", conversationHistory);
 
                 // Pause gate: FluxBrain sets this when waiting for user guidance
                 if (_pausedForUserInput)
@@ -1334,6 +1356,21 @@ import pygame
                     failedAttempts.Add("No action command found in response.");
                 }
             }
+            }
+            catch (OperationCanceledException)
+            {
+                // User cancel or app shutdown — preserve existing re-throw behavior, but the
+                // partial trace is already on disk from the per-step snapshots.
+                WriteTraceSnapshot(userRequest, "INTERRUPTED (cancelled / shutting down)", conversationHistory);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Crash mid-step: flush what we have so the failure is debuggable, then re-throw.
+                WriteTraceSnapshot(userRequest,
+                    $"CRASHED: {ex.GetType().Name}: {ex.Message}", conversationHistory);
+                throw;
+            }
 
             log.AppendLine($"[!] Reached max steps ({MAX_STEPS})");
             log.AppendLine("\n\n=== DETAILED LOG FOR DEBUGGING ===");
@@ -1382,7 +1419,11 @@ import pygame
                 $"{(success ? "COMPLETED" : "FAILED")} after {steps} steps " +
                 $"[{string.Join(",", usedCommandTypes)}]: {userRequest.Substring(0, Math.Min(80, userRequest.Length))}");
 
-            WriteTaskTraceFile(userRequest, success, steps, usedCommandTypes, conversationHistory);
+            // Final snapshot — overwrites the in-progress ones at the SAME per-task file.
+            WriteTraceSnapshot(userRequest,
+                $"{(success ? "COMPLETED" : "FAILED")} after {steps} steps [{string.Join(",", usedCommandTypes)}]",
+                conversationHistory);
+            if (_currentTraceFile != null) _logToUI($"[📄] Trace saved: {_currentTraceFile}");
 
             _memory.ReinforceLessons(taskSucceeded: success);
 
@@ -1399,28 +1440,33 @@ import pygame
         }
 
         /// <summary>
-        /// Persists the verbatim model dialogue — post-truncation, exactly what the model
-        /// saw and said — to one file per task in %APPDATA%\Davos\traces\. This is the
-        /// ground-truth artifact for debugging sessions: grep this file instead of pasting
-        /// UI logs (which are duplicated 2-3x and contain none of the model-side context).
-        /// Covers TASK_COMPLETE / TASK_FAILED / max-steps exits; user-cancel and safety-stop
-        /// return before FinalizeTask and leave no trace file.
+        /// Writes the FULL current task dialogue (verbatim, post-truncation — exactly what the
+        /// model saw and said) to the per-task trace file at `_currentTraceFile`, a single
+        /// stable path chosen at task start. Called at task start, at the TOP of every step,
+        /// on crash/cancel, and at FinalizeTask — so a hung, crashed, in-progress, or cancelled
+        /// task ALWAYS leaves a readable trace, not only completed ones. Each call rewrites the
+        /// whole file (cheap for ≤30 short turns); the terminal call overwrites the in-progress
+        /// snapshots with the final OUTCOME. Grep this instead of the UI log (which is
+        /// duplicated 2-3x and lacks the model-side context). Never throws — trace persistence
+        /// must never break the task.
         /// </summary>
-        private void WriteTaskTraceFile(string userRequest, bool success, int steps,
-            HashSet<string> usedCommandTypes, List<ChatMessage> conversationHistory)
+        private void WriteTraceSnapshot(string userRequest, string outcomeLine,
+            List<ChatMessage> conversationHistory)
         {
             try
             {
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "Davos", "traces");
-                Directory.CreateDirectory(dir);
+                if (string.IsNullOrEmpty(_currentTraceFile))
+                {
+                    string dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Davos", "traces");
+                    Directory.CreateDirectory(dir);
+                    _currentTraceFile = Path.Combine(dir, $"trace_{DateTime.Now:yyyyMMdd_HHmmss}.md");
+                }
 
                 var sb = new StringBuilder();
                 sb.AppendLine($"# Davos task trace — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 sb.AppendLine($"TASK: {userRequest}");
-                sb.AppendLine($"OUTCOME: {(success ? "COMPLETED" : "FAILED")} after {steps} steps " +
-                              $"[{string.Join(",", usedCommandTypes)}]");
+                sb.AppendLine($"OUTCOME: {outcomeLine}");
                 sb.AppendLine();
                 int turn = 0;
                 foreach (var msg in conversationHistory)
@@ -1431,13 +1477,11 @@ import pygame
                     sb.AppendLine();
                 }
 
-                string file = Path.Combine(dir, $"trace_{DateTime.Now:yyyyMMdd_HHmmss}.md");
-                File.WriteAllText(file, sb.ToString(), Encoding.UTF8);
-                _logToUI($"[📄] Trace saved: {file}");
+                File.WriteAllText(_currentTraceFile, sb.ToString(), Encoding.UTF8);
             }
             catch (Exception ex)
             {
-                // Trace persistence must never break task finalization
+                // Trace persistence must never break the task.
                 System.Diagnostics.Debug.WriteLine($"[Trace] Write failed: {ex.Message}");
             }
         }
