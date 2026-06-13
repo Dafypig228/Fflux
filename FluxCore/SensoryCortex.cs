@@ -121,6 +121,19 @@ namespace FluxCore
             }
             catch { return ""; }
         }
+        /// <summary>
+        /// Logical size of the screen the screenshot is derived from (FULL, not the
+        /// half-res capture). Single source of truth for mapping vision-model normalized
+        /// coordinates back to clickable pixels — read live so a resolution/DPI/monitor
+        /// change can never desync the mapping. GetScreenBase64 halves THIS, so any change
+        /// to the capture scale must stay paired with the consumer in JarvisCore.
+        /// </summary>
+        public (int width, int height) GetScreenLogicalSize()
+        {
+            var b = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
+            return (b.Width, b.Height);
+        }
+
         private System.Drawing.Imaging.ImageCodecInfo GetEncoder(System.Drawing.Imaging.ImageFormat format)
         {
             return System.Drawing.Imaging.ImageCodecInfo.GetImageDecoders().FirstOrDefault(c => c.FormatID == format.Guid)

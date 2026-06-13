@@ -146,6 +146,19 @@ User input (text/voice)
     unsupported growth verdict, then TASK_COMPLETE). `lastDataOutput` keeps the TAIL.
     The `<grounding>` section documents the marker; keep them in sync.
 
+15. **Vision-grounded click** (`VisionGroundedClickAsync`, cmd `[[FIND_AND_CLICK:desc]]`).
+    The router's fallback for targets with NO accessibility tree (Telegram desktop, games,
+    canvas/WebGL UIs) where the UIA element list is empty and pixel-guessing fails. Asks the
+    vision LLM to locate the described element and clicks it. CRITICAL invariant: the model
+    returns **NORMALIZED coords (0–1000)**, never pixels — it may re-tile the screenshot to an
+    arbitrary size, so pixel coords would silently mis-click ("screenshots are not equal size").
+    Mapping reads LIVE geometry: `SensoryCortex.GetScreenLogicalSize()` (full) → ×½ = screenshot
+    space → existing CLICK path ×2 = logical. GetScreenBase64 halves the SAME bounds — keep the
+    capture scale and this consumer paired. Single-shot (no 3× retry — each miss = one vision call).
+    This is ONE layer of the planned method-router (API→UIA→vision→coords); speculative batching
+    and UIA `SetValue` typing are NOT built yet. Research basis: UFO²/OmniParser hybrid, RPA
+    fallback cascades (CHAT-HISTORY session 5).
+
 14. **Script evidence honesty** (`RunProcessAsync` / `RunPowerShellAsync`):
     - PS 5.1 defaults `Out-File`/`>` to UTF-16 LE → Python reads NUL-riddled garbage.
       The utf8Prefix forces `$PSDefaultParameterValues['Out-File:Encoding']='utf8'` (+

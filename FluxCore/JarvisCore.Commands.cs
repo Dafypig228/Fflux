@@ -27,7 +27,11 @@ namespace FluxCore
             //              sees the error and writes a corrected script next step.
             //   Other UI — transient focus/timing issues are real, allow retries.
             bool isUiCommand = ScreenCommands.Contains(upperType);
-            int maxRetries = (upperType == "CLICK" || upperType == "CLICKING") ? 1
+            // CLICK and the vision-grounded clicks retry at most once: each FIND_AND_CLICK
+            // miss costs a full vision LLM call, so 3× retries would burn 3 calls on a
+            // not-found. The model re-decides next step from the honest failure instead.
+            bool isSingleShot = upperType is "CLICK" or "CLICKING" or "FIND_AND_CLICK" or "VISION_CLICK";
+            int maxRetries = isSingleShot ? 1
                            : isUiCommand ? MAX_RETRIES
                            : 1;
 
@@ -77,6 +81,74 @@ namespace FluxCore
             }
 
             return new ExecutionOutcome(false, $"Failed: {lastError}");
+        }
+
+        /// <summary>
+        /// Vision-grounded click — the router's fallback for targets the accessibility tree
+        /// can't see (custom-drawn apps: Telegram desktop, games, canvas/WebGL UIs). Asks the
+        /// vision model to locate the described element on a fresh screenshot and clicks it.
+        ///
+        /// Coordinates come back NORMALIZED (0–1000), not pixels: the model may internally
+        /// re-tile the image to an arbitrary size, so pixel coords would silently mis-click —
+        /// the "screenshots are not equal size" trap. Normalized coords are size-independent;
+        /// we map them to the LIVE screen geometry (read every call) and reuse the existing
+        /// coordinate-click path (bounds check + window-change detection + reporting).
+        /// </summary>
+        private async Task<ExecutionResult> VisionGroundedClickAsync(string description)
+        {
+            if (string.IsNullOrWhiteSpace(description))
+                return new ExecutionResult(false, "FIND_AND_CLICK needs a description of WHAT to click.");
+
+            string shot = _cortex.GetScreenBase64();
+            if (string.IsNullOrEmpty(shot))
+                return new ExecutionResult(false, "Vision grounding failed: could not capture the screen.");
+
+            const string sys =
+                "You are a precise UI-grounding tool. You receive a screenshot of the user's screen and " +
+                "a description of ONE element to click. Reply with ONLY the click point as normalized " +
+                "coordinates in the form 'x,y', where x and y are integers from 0 to 1000 " +
+                "(0,0 = top-left corner, 1000,1000 = bottom-right corner), aimed at the CENTER of the " +
+                "element. Output nothing else — no words, no units. " +
+                "If the element is NOT visible on screen, reply with exactly: NOT_FOUND";
+
+            string reply;
+            try
+            {
+                reply = await _llm.ChatWithHistory(
+                    new List<ChatMessage>(), $"Click target: {description}",
+                    "BASE64:" + shot, _getActiveWindow(), "", sys, 0.0f);
+            }
+            catch (Exception ex)
+            {
+                return new ExecutionResult(false, $"Vision grounding call failed: {ex.Message}");
+            }
+
+            reply = (reply ?? "").Trim();
+            if (reply.IndexOf("NOT_FOUND", StringComparison.OrdinalIgnoreCase) >= 0)
+                return new ExecutionResult(false,
+                    $"Vision could not find '{description}' on screen. Scroll to reveal it, or describe it differently.");
+
+            var m = System.Text.RegularExpressions.Regex.Match(reply, @"(\d{1,4})\s*[,; ]\s*(\d{1,4})");
+            if (!m.Success)
+                return new ExecutionResult(false,
+                    $"Vision returned an unparseable location ('{reply}'). Try again or use [[CLICK:x,y]].");
+
+            int normX = int.Parse(m.Groups[1].Value);
+            int normY = int.Parse(m.Groups[2].Value);
+            if (normX is < 0 or > 1000 || normY is < 0 or > 1000)
+                return new ExecutionResult(false,
+                    $"Vision returned out-of-range coordinates ({normX},{normY}); expected 0–1000.");
+
+            // Normalized (0–1000) → SCREENSHOT-SPACE pixels (half of logical). The existing
+            // coordinate path scales ×2 back to logical, so net = normX/1000 × full width.
+            // Geometry is read LIVE from the same source GetScreenBase64 halves — never hardcoded.
+            var (logicalW, logicalH) = _cortex.GetScreenLogicalSize();
+            int sx = (int)Math.Round(normX / 1000.0 * (logicalW / 2.0));
+            int sy = (int)Math.Round(normY / 1000.0 * (logicalH / 2.0));
+
+            var click = await _automation.ClickElementAsync($"{sx},{sy}");
+            string tag = click.Success ? $"[vision grounded '{description}' → {normX},{normY}/1000] " : "";
+            return new ExecutionResult(click.Success, tag + click.Message);
         }
 
         /// <summary>
@@ -138,6 +210,11 @@ namespace FluxCore
                     // CLICK:7 = element [7] from the current step's numbered list
                     var clickRes = await _automation.ClickElementAsync(ResolveElementIndex(cmdArg));
                     return new ExecutionResult(clickRes.Success, clickRes.Message);
+
+                case "FIND_AND_CLICK":
+                case "VISION_CLICK":
+                    // Vision fallback for apps with no usable accessibility tree
+                    return await VisionGroundedClickAsync(cmdArg);
 
                 case "SCROLL":
                     var scrollRes = await _automation.ScrollAsync(cmdArg);

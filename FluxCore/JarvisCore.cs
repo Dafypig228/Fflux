@@ -115,7 +115,8 @@ namespace FluxCore
             "CLICK", "CLICKING", "TYPE", "TYPING", "KEYS", "SCROLL", "DRAG", "DRAGGING",
             "OPEN_APP", "LAUNCHING", "OPENING", "WINDOW",
             "CLICK_TEXT", "BROWSER_TYPE", "BROWSER_OPEN", "PAGE_INFO",
-            "HIDE_SELF", "MINIMIZE_SELF"
+            "HIDE_SELF", "MINIMIZE_SELF",
+            "FIND_AND_CLICK", "VISION_CLICK"
         };
 
         // Commands that may legitimately repeat with identical args
@@ -318,6 +319,10 @@ FINISHING THE TASK (exact protocol):
 
   [[CLICK:x,y]]              - Click at coordinates (use for UI when no code approach exists)
   [[CLICK:name]]             - Click by text (ONLY if element name is unique on screen)
+  [[FIND_AND_CLICK:desc]]    - Vision-locate and click an element by DESCRIPTION when it is NOT
+                               in the VISIBLE UI ELEMENTS list (custom-drawn apps with no
+                               accessibility tree: Telegram desktop, games, canvas/WebGL pages).
+                               Costs a vision call — use it ONLY when the element list fails you.
   [[TYPE:text]]              - Type text into the CURRENTLY FOCUSED input field
   [[KEYS:combo]]             - Keyboard shortcut: ENTER, TAB, CTRL+C, CTRL+L, WIN+D, ALT+F4, ESCAPE
   [[SCROLL:up/down]]         - Scroll the active window
@@ -368,10 +373,13 @@ ALL TOOLS AVAILABLE AT ALL TIMES:
   - CLICK/TYPE/KEYS interact with the screen — use them for UI navigation.
   - NEVER use [[OPEN_APP:powershell]] or [[OPEN_APP:cmd]]. RUN_SHELL already IS PowerShell.
 
-CLICKING:
-  - [[CLICK:n]] clicks element [n] from the VISIBLE UI ELEMENTS list (preferred), or use [[CLICK:x,y]].
+CLICKING (pick the FASTEST method that can actually see the target):
+  - [[CLICK:n]] clicks element [n] from the VISIBLE UI ELEMENTS list — PREFER this (instant, exact).
+  - [[CLICK:x,y]] when you have specific coordinates. Coordinates are in SCREENSHOT SPACE (half res).
+  - [[FIND_AND_CLICK:description]] ONLY when the target is NOT in the element list (custom-drawn
+    apps: Telegram desktop, games, canvas web UIs). It looks at the screen and finds the element.
+  - For apps with a real API (Telegram, files, system, HTTP) DON'T click at all — use the API/script.
   - NEVER use [[CLICK:name]] if multiple elements share that name.
-  - Coordinates are in SCREENSHOT SPACE (half of screen resolution).
 
 VERIFICATION:
   - BEFORE saying TASK_COMPLETE, you MUST verify what is on screen.
