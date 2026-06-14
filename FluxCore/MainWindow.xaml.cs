@@ -103,6 +103,8 @@ namespace FluxCore
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+        [DllImport("user32.dll")] private static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+        private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 
@@ -161,6 +163,7 @@ namespace FluxCore
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
             HideFromAltTab();
+            ExcludeFromCapture();
 
             if (!_isSecondary)
             {
@@ -199,6 +202,21 @@ namespace FluxCore
             var helper = new WindowInteropHelper(this);
             int exStyle = GetWindowLong(helper.Handle, GWL_EXSTYLE);
             SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW);
+        }
+
+        // Keep Davos's OWN window out of the screenshots the task loop captures, while it stays
+        // fully visible to the user. Without this the HUD can sit in the model's vision and under
+        // the cursor — "he can't see through himself". WDA_EXCLUDEFROMCAPTURE needs Win10 2004+;
+        // best-effort, never fatal.
+        private void ExcludeFromCapture()
+        {
+            try
+            {
+                var helper = new WindowInteropHelper(this);
+                if (helper.Handle != IntPtr.Zero)
+                    SetWindowDisplayAffinity(helper.Handle, WDA_EXCLUDEFROMCAPTURE);
+            }
+            catch { }
         }
 
         private void InitializeServices()

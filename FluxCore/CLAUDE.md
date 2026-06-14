@@ -130,9 +130,11 @@ User input (text/voice)
 
 11. **Loop detection**: identical actions are blocked at 3rd repeat EXCEPT
     `RepeatTolerantCommands` (SCROLL/WAIT/READ_LOG/CHECK_BACKGROUND/LOG) — those
-    legitimately repeat (scrolling lists, polling bot logs). KEYS is WARN-ONLY
-    (executed, never blocked): pressing ENTER/TAB at different moments is normal;
-    hard-blocking it forced absurd workarounds (CAPTCHA trace 2026-06-12).
+    legitimately repeat (scrolling lists, polling bot logs). KEYS **and TYPE** are WARN-ONLY
+    (executed, never blocked): pressing ENTER/TAB — or typing the same text — at different
+    moments is normal; hard-blocking it forced absurd workarounds (CAPTCHA trace 2026-06-12;
+    Askar trace 2026-06-14 hard-blocked TYPE:Askar at the exact step it had FINALLY focused the
+    right field, after wasting its 3 allowances typing into the wrong field).
 
 12. **Parser**: script args in `ExtractAllCommands` are bounded at the next `[[COMMAND:`
     opener — without the bound, the "last ]]\n" fallback swallowed following commands
@@ -215,6 +217,28 @@ User input (text/voice)
       silent `exit 1` reported success). Failure messages include STDOUT — pre-crash prints
       are evidence. Exit-0 stderr is surfaced labeled (CLIXML noise filtered).
     - `PYTHONIOENCODING=utf-8` is set for all spawned processes.
+
+20. **Truthful perception / element model — "not blind" = the list is GROUND TRUTH**
+    (`SensoryCortex.GetClickableElements`, perception layer 1, 2026-06-14). The numbered
+    VISIBLE UI ELEMENTS list is what the model targets via `[[CLICK:n]]`; it MUST be complete,
+    faithful, and stable, or the model invents an index and clicks the wrong thing (Askar/Контакты
+    trace 205531: wanted Contacts `[8]`, hit the chat 'Надо'). Rules:
+    - **Classify by `ControlType` enum, NEVER by `LocalizedControlType`.** The old filter
+      `type != "edit"` compared the LOCALIZED string ("поле" on this RU Windows) → every input
+      field was silently dropped → Telegram's search was never listed → blind coord-guessing.
+    - **Always include input fields** (Edit/ComboBox) even when unnamed (label via HelpText/
+      AutomationId/`(type field)`); inputs are never cut by the cap (appended if over).
+    - **Stable reading order** (Y in ~16px bands, then X) so `[n]` matches the screenshot and does
+      not reshuffle between steps. Non-browser cap raised 15→25 (browser stays 50).
+    - **Coverage honesty**: empty list says "pixel-only, do NOT invent an index"; a capped list
+      shows "+N more — SCROLL". Prompt teaches: `[[CLICK:n]]` valid ONLY for an `n` listed THIS
+      step; if the target isn't listed it is NOT in the tree → SCROLL / FIND_AND_CLICK / conclude
+      absent. This is what lets the model know "there is no such button" instead of guessing.
+    - **Davos excludes its OWN window from capture** (`MainWindow.ExcludeFromCapture`,
+      `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`): the HUD stays visible to the user but
+      never appears in the model's screenshot or under the cursor ("can't see through himself").
+    Layer 1 of the perception roadmap; layers 2 (UIA+OCR+vision fusion) and 3 (passive
+    watch-and-synthesize, roadmap #3) build on this faithful base. Coords stay ÷2 (invariant #2).
 
 ---
 

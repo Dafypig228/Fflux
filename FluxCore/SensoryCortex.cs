@@ -240,13 +240,17 @@ namespace FluxCore
                 
                 var elements = rootElement.FindAll(TreeScope.Descendants, condition);
                 
-                // Collect all elements with their parent info
-                var collected = new List<(string name, string type, string parent, int x, int y)>();
-                
+                // Collect elements with parent context + locale-independent classification.
+                // type  = LocalizedControlType (shown to the model — matches the screenshot language).
+                // ctype = ControlType enum, used for ALL logic. The old code compared the LOCALIZED
+                // string to "edit"/"image"/"button", so on a non-English Windows EVERY input field
+                // was dropped (Telegram's "поле" search box → never listed → blind coord-guessing).
+                var collected = new List<(string name, string type, ControlType ctype, string parent, int x, int y, bool isInput, bool isInteractive)>();
+
                 foreach (AutomationElement elem in elements)
                 {
-                    if (collected.Count >= effectiveMax * 2) break;
-                    
+                    if (collected.Count >= effectiveMax * 3) break;
+
                     try
                     {
                         var rect = elem.Current.BoundingRectangle;
@@ -254,15 +258,26 @@ namespace FluxCore
                         if (rect.X < 0 || rect.Y < 0) continue;
                         // Filter tiny invisible elements (web page artifacts)
                         if (rect.Width < 10 || rect.Height < 10) continue;
-                        
+
                         int centerX = (int)(rect.X + rect.Width / 2);
                         int centerY = (int)(rect.Y + rect.Height / 2);
-                        
+
                         string name = elem.Current.Name;
                         string type = elem.Current.LocalizedControlType;
-                        
-                        if (string.IsNullOrWhiteSpace(name) && type != "edit") continue;
-                        
+                        ControlType ctype = elem.Current.ControlType;
+
+                        bool isInput = ctype == ControlType.Edit || ctype == ControlType.ComboBox;
+                        bool isInteractive = isInput
+                            || ctype == ControlType.Button || ctype == ControlType.Hyperlink
+                            || ctype == ControlType.MenuItem || ctype == ControlType.ListItem
+                            || ctype == ControlType.TabItem || ctype == ControlType.CheckBox
+                            || ctype == ControlType.RadioButton || ctype == ControlType.TreeItem
+                            || ctype == ControlType.DataItem || ctype == ControlType.SplitButton;
+
+                        // KEEP an input field even when unnamed (that was the dropped search box).
+                        // Drop only unnamed, non-input noise (Text/Group/Custom/Image with no name).
+                        if (string.IsNullOrWhiteSpace(name) && !isInput) continue;
+
                         // Get parent element name for context
                         string parentName = "";
                         try
@@ -279,20 +294,31 @@ namespace FluxCore
                             }
                         }
                         catch { }
-                        
-                        string displayName = string.IsNullOrWhiteSpace(name) ? $"({type})" : name;
+
+                        // Unnamed input → label it so the model can still target it honestly.
+                        string displayName = name;
+                        if (string.IsNullOrWhiteSpace(displayName))
+                        {
+                            try { displayName = elem.Current.HelpText; } catch { }
+                            if (string.IsNullOrWhiteSpace(displayName))
+                            {
+                                try { var aid = elem.Current.AutomationId; if (!string.IsNullOrWhiteSpace(aid)) displayName = aid; } catch { }
+                            }
+                            if (string.IsNullOrWhiteSpace(displayName)) displayName = $"({type} field)";
+                        }
                         if (displayName.Length > 40) displayName = displayName.Substring(0, 37) + "...";
-                        
+
                         // Truncate parent name too (WhatsApp previews can be 500+ chars)
                         if (parentName.Length > 40) parentName = parentName.Substring(0, 37) + "...";
-                        
-                        collected.Add((displayName, type, parentName, centerX, centerY));
+
+                        collected.Add((displayName, type, ctype, parentName, centerX, centerY, isInput, isInteractive));
                     }
                     catch { }
                 }
                 
-                // DEDUP: Remove elements at the same coordinates (link + image icon at same spot)
-                var deduped = new List<(string name, string type, string parent, int x, int y)>();
+                // DEDUP: collapse elements at the same spot (link + icon overlay). Uses the
+                // ControlType enum, not localized strings, so it works in any UI language.
+                var deduped = new List<(string name, string type, ControlType ctype, string parent, int x, int y, bool isInput, bool isInteractive)>();
                 var seenCoords = new HashSet<string>();
                 foreach (var el in collected)
                 {
@@ -300,40 +326,52 @@ namespace FluxCore
                     string coordKey = $"{el.x / 10},{el.y / 10}";
                     if (seenCoords.Contains(coordKey))
                     {
-                        // Skip image duplicates — keep the more useful type (link/button)
-                        if (el.type == "изображение" || el.type == "image") continue;
-                        // If already have this coord but new one is more useful, replace
+                        if (el.ctype == ControlType.Image) continue; // drop icon overlay at a shared coord
                         int existingIdx = deduped.FindIndex(d => $"{d.x / 10},{d.y / 10}" == coordKey);
-                        if (existingIdx >= 0 && (el.type == "кнопка" || el.type == "ссылка" || el.type == "button" || el.type == "link"))
-                        {
+                        // Prefer the more actionable element when two share a coordinate.
+                        if (existingIdx >= 0 && (el.ctype == ControlType.Button || el.ctype == ControlType.Hyperlink || el.isInput))
                             deduped[existingIdx] = el;
-                        }
                         continue;
                     }
                     seenCoords.Add(coordKey);
                     deduped.Add(el);
                 }
-                
-                int count = 0;
-                foreach (var el in deduped)
-                {
-                    if (count >= effectiveMax) break;
 
+                // STABLE READING ORDER: top→bottom in ~16px bands, then left→right. Makes [n] mean
+                // what the model sees in the screenshot and stops the index reshuffling between
+                // steps (the "wanted Контакты [8], clicked the chat 'Надо'" failure, trace 205531).
+                var ordered = deduped.OrderBy(d => d.y / 16).ThenBy(d => d.x).ToList();
+
+                // Apply the cap, but NEVER drop an input field — a missing search box is exactly
+                // what blinded him. Any input past the cap is appended rather than cut.
+                var shown = ordered.Take(effectiveMax).ToList();
+                foreach (var input in ordered.Skip(effectiveMax).Where(d => d.isInput))
+                    shown.Add(input);
+
+                int count = 0;
+                foreach (var el in shown)
+                {
                     string parentInfo = !string.IsNullOrEmpty(el.parent) ? $" in:{el.parent}" : "";
-                    // Coords divided by 2 to match 50%-scaled screenshot space
+                    // Coords divided by 2 to match 50%-scaled screenshot space (invariant #2)
                     sb.AppendLine($"  [{count + 1}] {el.type} \"{el.name}\"{parentInfo} → {el.x / 2},{el.y / 2}");
                     count++;
                 }
-                
+
+                // COVERAGE HONESTY — lets the model reason about ABSENCE instead of inventing an index.
                 if (count == 0)
                 {
-                    sb.AppendLine("  (No elements found — use coordinates from screenshot)");
+                    sb.AppendLine("  (NONE — this window exposes no accessibility elements; it is pixel-only.");
+                    sb.AppendLine("   Use the screenshot with [[FIND_AND_CLICK:description]] or [[CLICK:x,y]]. Do NOT invent a [[CLICK:n]] index.)");
                 }
                 else
                 {
-                    sb.AppendLine($"\n⚠ Click via [[CLICK:n]] (element number above) or [[CLICK:x,y]] coordinates from this list.");
+                    if (ordered.Count > count)
+                        sb.AppendLine($"  …(+{ordered.Count - count} more off-screen — [[SCROLL:down]] to reveal, or be more specific)");
+                    sb.AppendLine("\n⚠ This list is your GROUND TRUTH. [[CLICK:n]] is valid ONLY for an [n] above. If the control");
+                    sb.AppendLine("  you want is NOT listed, it is not in the accessibility tree — [[SCROLL:down]] to reveal it,");
+                    sb.AppendLine("  use [[FIND_AND_CLICK:desc]], or conclude it is not present. NEVER guess an index.");
                 }
-                
+
                 return sb.ToString();
             }
             catch (Exception ex)

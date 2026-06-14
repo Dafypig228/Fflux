@@ -378,11 +378,16 @@ ALL TOOLS AVAILABLE AT ALL TIMES:
   - CLICK/TYPE/KEYS interact with the screen — use them for UI navigation.
   - NEVER use [[OPEN_APP:powershell]] or [[OPEN_APP:cmd]]. RUN_SHELL already IS PowerShell.
 
-CLICKING (pick the FASTEST method that can actually see the target):
-  - [[CLICK:n]] clicks element [n] from the VISIBLE UI ELEMENTS list — PREFER this (instant, exact).
+CLICKING (the VISIBLE UI ELEMENTS list is your GROUND TRUTH, not the screenshot):
+  - [[CLICK:n]] clicks element [n] from the list. Valid ONLY for an [n] that appears in THIS step's
+    list. Do not carry an index over from a previous step — the list is rebuilt every step.
+  - If the control you want is NOT in the list, it is NOT in the accessibility tree. Do ONE of:
+    [[SCROLL:down]] to reveal it, [[FIND_AND_CLICK:desc]] to locate it by sight, or — if it truly
+    isn't there — say so and stop. NEVER invent an [n], and never assume a button exists because
+    you expect it to. Clicking an index you did not see in the list is how you hit the wrong thing.
   - [[CLICK:x,y]] when you have specific coordinates. Coordinates are in SCREENSHOT SPACE (half res).
-  - [[FIND_AND_CLICK:description]] ONLY when the target is NOT in the element list (custom-drawn
-    apps: Telegram desktop, games, canvas web UIs). It looks at the screen and finds the element.
+  - [[FIND_AND_CLICK:description]] for custom-drawn apps with an empty/partial list (Telegram
+    desktop, games, canvas web UIs). It looks at the screen and finds the element.
   - For apps with a real API (Telegram, files, system, HTTP) DON'T click at all — use the API/script.
   - NEVER use [[CLICK:name]] if multiple elements share that name.
 
@@ -640,7 +645,7 @@ import pygame
                         var screenshotTask = Task.Run(() => _getScreenshot());
                         
                         // Element scan on THIS thread (UIA is COM/STA, can't run on ThreadPool)
-                        try { clickableElements = _cortex?.GetClickableElements(15) ?? ""; }
+                        try { clickableElements = _cortex?.GetClickableElements(25) ?? ""; }
                         catch { clickableElements = ""; }
                         _lastElementsList = clickableElements; // for CLICK:<index> resolution
                         
@@ -918,12 +923,15 @@ import pygame
                         int repeatCount = actionHistory.Count(a => a == actionKey);
                         if (repeatCount >= 2 && !RepeatTolerantCommands.Contains(cmd.Type))
                         {
-                            // KEYS: warn but EXECUTE (mirrors the CLICK-near-loop design).
-                            // Pressing the same key (ENTER, TAB) at different moments of a long
-                            // task is normal; hard-blocking forced pathological workarounds
-                            // (CAPTCHA trace 2026-06-12: blocked KEYS:ENTER → the model clicked
-                            // autocomplete suggestions because it "wasn't allowed" to press Enter).
-                            if (cmd.Type.Equals("KEYS", StringComparison.OrdinalIgnoreCase))
+                            // KEYS/TYPE: warn but EXECUTE (mirrors the CLICK-near-loop design).
+                            // Pressing the same key (ENTER, TAB) — or typing the same text — at
+                            // different moments of a long task is normal; hard-blocking forced
+                            // pathological workarounds (CAPTCHA trace 2026-06-12: blocked KEYS:ENTER →
+                            // the model clicked autocomplete suggestions; Askar trace 2026-06-14:
+                            // blocked TYPE:Askar at the exact step it had FINALLY focused the right
+                            // search field, after wasting its 3 allowances on the wrong field).
+                            if (cmd.Type.Equals("KEYS", StringComparison.OrdinalIgnoreCase)
+                                || cmd.Type.Equals("TYPE", StringComparison.OrdinalIgnoreCase))
                             {
                                 conversationHistory.Add(new ChatMessage
                                 {
