@@ -179,6 +179,12 @@ User input (text/voice)
     now returns whether focus actually took; after OPEN_APP the loop verifies frontmost and warns
     the model if not — so it stops assuming focus. Research: AttachThreadInput is THE missing piece
     (west-wind/oldnewthing). Do NOT regress to bare SetForegroundWindow.
+    **WINDOW IDENTITY (the reason it still failed at first):** all the above is gated on
+    `FindWindowByName` finding the HWND — and that was TITLE-only. Telegram/Discord/Slack/many games
+    title their window by CONTENT (Telegram → open chat name "PWGood"), so the window was never
+    found → lock + AttachThreadInput + readiness ALL skipped → only ExecutionAgent's weak focus ran
+    → stayed on Steam (WINDOW_STATE proved it, trace 22:50). `FindWindowByName` now falls back to
+    PROCESS-name matching. Lesson: title-based window identity is unreliable; match by process.
 
 16. **Registering a command touches 4 sites — miss one and it fails differently:**
     `KnownCommandTypes` (parser registry; miss → silently dropped, model loops "no command"),

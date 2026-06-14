@@ -410,7 +410,37 @@ namespace FluxCore
                 return true;
             }, IntPtr.Zero);
 
-            return found;
+            if (found != IntPtr.Zero) return found;
+
+            // FALLBACK: title matching fails for apps that title their window by CONTENT, not by
+            // app name — Telegram shows the open chat name ("PWGood"), Discord/Slack/many games do
+            // the same. Without this the window is never found, so SetLockedTarget + the robust
+            // AttachThreadInput focus + readiness wait ALL get skipped and the app never comes to
+            // front (Telegram trace 2026-06-13: WINDOW_STATE stayed 'Steam'). Identify by PROCESS.
+            try
+            {
+                string needle = partialName.ToLowerInvariant().Replace(".exe", "").Trim();
+                int myPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                IntPtr exact = IntPtr.Zero, partial = IntPtr.Zero;
+                foreach (var p in System.Diagnostics.Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (p.Id == myPid || p.MainWindowHandle == IntPtr.Zero) continue;
+                        string pn = p.ProcessName.ToLowerInvariant();
+                        if (pn == needle) { exact = p.MainWindowHandle; break; }
+                        if (partial == IntPtr.Zero && needle.Length >= 3 &&
+                            (pn.Contains(needle) || needle.Contains(pn)))
+                            partial = p.MainWindowHandle;
+                    }
+                    catch { /* process exited or access denied */ }
+                }
+                if (exact != IntPtr.Zero) return exact;
+                if (partial != IntPtr.Zero) return partial;
+            }
+            catch { }
+
+            return found; // Zero — caller handles "not found"
         }
     }
 }
